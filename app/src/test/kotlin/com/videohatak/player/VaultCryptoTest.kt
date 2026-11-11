@@ -14,6 +14,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.junit.runners.model.FrameworkMethod
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 import org.junit.rules.TemporaryFolder
 import java.io.ByteArrayInputStream
 import java.io.File
@@ -26,20 +30,22 @@ import javax.crypto.AEADBadTagException
  * Comprehensive Unit Tests for Task 10: Secure Vault Cryptographic Engine.
  *
  * Covers:
- * 1. AES-256 Data Encryption Key (DEK) generation and master key envelope wrapping/unwrapping.
- * 2. Deterministic 12-byte GCM Nonce derivation (salt + chunk index).
- * 3. Strict Nonce uniqueness across chunk sequences.
- * 4. Single-chunk streaming encryption and decryption round-trip.
- * 5. Multi-chunk (boundary-crossing) streaming encryption and decryption round-trip.
- * 6. Random-access Seeking/Scrubbing byte range reading without full file decryption.
- * 7. AEAD Integrity: Tampering detection throws AEADBadTagException.
- * 8. Header Magic and version verification.
- * 9. Handling of 0-byte empty file encryption.
- * 10. Inactivity lock timeout logic.
- * 11. VaultVideo to VideoItem metadata masking (secure_vault bucket, zero leak).
- * 12. Cancellation during encryption: ensures immediate abort and cleanup of temporary files.
- * 13. File header parsing accuracy.
+ * 1. AES-256 Data Encryption Key generation and envelope wrapping.
+ * 2. Deterministic 12-byte GCM nonce derivation.
+ * 3. Nonce uniqueness across chunk sequences.
+ * 4. Single-chunk encryption and decryption.
+ * 5. Multi-chunk encryption and seeking.
+ * 6. Random-access range reading.
+ * 7. AEAD integrity and tampering detection.
+ * 8. Header validation.
+ * 9. Empty-file handling.
+ * 10. Inactivity timeout logic.
+ * 11. VaultVideo metadata masking.
+ * 12. Cancellation cleanup.
+ * 13. Temporary-file cleanup after stream failure.
  */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
 class VaultCryptoTest {
 
     @get:Rule
@@ -49,7 +55,6 @@ class VaultCryptoTest {
 
     @Before
     fun setUp() {
-        // Uses fallback software master key in standard JVM unit test environment
         cryptoManager = VaultCryptoManager(keyStoreProvider = "TEST_PROVIDER")
     }
 
@@ -92,8 +97,7 @@ class VaultCryptoTest {
         for (i in 0..1000) {
             val nonce = cryptoManager.deriveChunkNonce(fileSalt, i)
             val hex = nonce.joinToString("") { "%02x".format(it) }
-            val added = generatedNonces.add(hex)
-            assertTrue("Nonce for chunk $i must be globally unique within file", added)
+            assertTrue("Nonce for chunk $i must be globally unique within file", generatedNonces.add(hex))
         }
     }
 
@@ -136,10 +140,7 @@ class VaultCryptoTest {
     fun testMultiChunkEncryptionAndCrossChunkSeeking() {
         val chunkSize = 64 * 1024
         val totalSize = 150 * 1024
-        val testPayload = ByteArray(totalSize)
-        for (i in 0 until totalSize) {
-            testPayload[i] = (i % 251).toByte()
-        }
+        val testPayload = ByteArray(totalSize) { (it % 251).toByte() }
 
         val destFile = tempFolder.newFile("test_multi.enc")
         val result = cryptoManager.encryptStream(
@@ -170,13 +171,18 @@ class VaultCryptoTest {
 
         assertEquals(readLength, readBytes)
 
-        val expectedSlice = Arrays.copyOfRange(testPayload, seekOffset.toInt(), (seekOffset + readLength).toInt())
+        val expectedSlice = Arrays.copyOfRange(
+            testPayload,
+            seekOffset.toInt(),
+            (seekOffset + readLength).toInt()
+        )
         assertArrayEquals(expectedSlice, outBuffer)
     }
 
     @Test
     fun testRandomAccessSeekingAtArbitraryOffset() {
-        val testPayload = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".repeat(2000).toByteArray()
+        val testPayload = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+            .repeat(2000).toByteArray()
         val destFile = tempFolder.newFile("test_seek.enc")
         val chunkSize = 1024
 
@@ -205,7 +211,11 @@ class VaultCryptoTest {
         )
 
         assertEquals(length, read)
-        val expected = Arrays.copyOfRange(testPayload, offset.toInt(), (offset + length).toInt())
+        val expected = Arrays.copyOfRange(
+            testPayload,
+            offset.toInt(),
+            (offset + length).toInt()
+        )
         assertArrayEquals(expected, outBuffer)
     }
 
@@ -221,12 +231,12 @@ class VaultCryptoTest {
             chunkSize = 64 * 1024
         )
 
-        val raf = RandomAccessFile(destFile, "rw")
-        raf.seek(result.headerSize.toLong() + 5L)
-        val b = raf.readByte()
-        raf.seek(result.headerSize.toLong() + 5L)
-        raf.writeByte((b.toInt() xor 0xFF))
-        raf.close()
+        RandomAccessFile(destFile, "rw").use { raf ->
+            raf.seek(result.headerSize.toLong() + 5L)
+            val b = raf.readByte()
+            raf.seek(result.headerSize.toLong() + 5L)
+            raf.writeByte(b.toInt() xor 0xFF)
+        }
 
         val outBuffer = ByteArray(payload.size)
 
@@ -268,9 +278,10 @@ class VaultCryptoTest {
     @Test
     fun testCorruptHeaderMagicRejection() {
         val destFile = tempFolder.newFile("corrupt_magic.enc")
-        val raf = RandomAccessFile(destFile, "rw")
-        raf.write("BADMAGIC".toByteArray())
-        raf.close()
+
+        RandomAccessFile(destFile, "rw").use { raf ->
+            raf.write("BADMAGIC".toByteArray())
+        }
 
         assertThrows(IllegalArgumentException::class.java) {
             cryptoManager.parseEncryptedFileHeader(destFile)
@@ -310,12 +321,10 @@ class VaultCryptoTest {
         val now = 1_000_000L
 
         val recentInteraction = now - (60 * 1000L)
-        val isTimedOutRecent = (now - recentInteraction) > timeoutMs
-        assertFalse(isTimedOutRecent)
+        assertFalse((now - recentInteraction) > timeoutMs)
 
         val oldInteraction = now - (4 * 60 * 1000L)
-        val isTimedOutOld = (now - oldInteraction) > timeoutMs
-        assertTrue(isTimedOutOld)
+        assertTrue((now - oldInteraction) > timeoutMs)
     }
 
     @Test
@@ -351,9 +360,15 @@ class VaultCryptoTest {
 
         val irregularStream = object : java.io.InputStream() {
             private var index = 0
+
             override fun read(): Int {
-                return if (index < totalSize) payload[index++].toInt() and 0xFF else -1
+                return if (index < totalSize) {
+                    payload[index++].toInt() and 0xFF
+                } else {
+                    -1
+                }
             }
+
             override fun read(b: ByteArray, off: Int, len: Int): Int {
                 if (index >= totalSize) return -1
                 val chunk = minOf(len, 512, totalSize - index)
@@ -404,12 +419,12 @@ class VaultCryptoTest {
             chunkSize = 64 * 1024
         )
 
-        val raf = RandomAccessFile(destFile, "rw")
-        raf.seek(9L)
-        val b = raf.readByte()
-        raf.seek(9L)
-        raf.writeByte(b.toInt() xor 0xAA)
-        raf.close()
+        RandomAccessFile(destFile, "rw").use { raf ->
+            raf.seek(9L)
+            val b = raf.readByte()
+            raf.seek(9L)
+            raf.writeByte(b.toInt() xor 0xAA)
+        }
 
         val header = cryptoManager.parseEncryptedFileHeader(destFile)
         val outBuffer = ByteArray(payload.size)
@@ -442,12 +457,12 @@ class VaultCryptoTest {
             chunkSize = 64 * 1024
         )
 
-        val raf = RandomAccessFile(destFile, "rw")
-        raf.seek(result.headerSize.toLong() - 4L)
-        val b = raf.readByte()
-        raf.seek(result.headerSize.toLong() - 4L)
-        raf.writeByte(b.toInt() xor 0xFF)
-        raf.close()
+        RandomAccessFile(destFile, "rw").use { raf ->
+            raf.seek(result.headerSize.toLong() - 4L)
+            val b = raf.readByte()
+            raf.seek(result.headerSize.toLong() - 4L)
+            raf.writeByte(b.toInt() xor 0xFF)
+        }
 
         val header = cryptoManager.parseEncryptedFileHeader(destFile)
         val outBuffer = ByteArray(payload.size)
@@ -472,6 +487,7 @@ class VaultCryptoTest {
     fun testMemoryZeroingHygiene() {
         val sensitiveBuffer = byteArrayOf(0x01, 0x02, 0x03, 0x04, 0x05)
         cryptoManager.zeroByteArray(sensitiveBuffer)
+
         for (b in sensitiveBuffer) {
             assertEquals(0.toByte(), b)
         }
@@ -496,15 +512,21 @@ class VaultCryptoTest {
             private var shouldReturnZero = false
 
             override fun read(): Int {
-                return if (index < totalSize) payload[index++].toInt() and 0xFF else -1
+                return if (index < totalSize) {
+                    payload[index++].toInt() and 0xFF
+                } else {
+                    -1
+                }
             }
 
             override fun read(b: ByteArray, off: Int, len: Int): Int {
                 if (index >= totalSize) return -1
+
                 if (shouldReturnZero) {
                     shouldReturnZero = false
                     return 0
                 }
+
                 shouldReturnZero = true
                 val toRead = minOf(len, 1024, totalSize - index)
                 System.arraycopy(payload, index, b, off, toRead)
@@ -554,12 +576,12 @@ class VaultCryptoTest {
             chunkSize = 64 * 1024
         )
 
-        val raf = RandomAccessFile(destFile, "rw")
-        raf.seek(80L)
-        val originalChunkSize = raf.readInt()
-        raf.seek(80L)
-        raf.writeInt(originalChunkSize + 1024)
-        raf.close()
+        RandomAccessFile(destFile, "rw").use { raf ->
+            raf.seek(80L)
+            val originalChunkSize = raf.readInt()
+            raf.seek(80L)
+            raf.writeInt(originalChunkSize + 1024)
+        }
 
         val header = cryptoManager.parseEncryptedFileHeader(destFile)
         val outBuffer = ByteArray(payload.size)
@@ -594,22 +616,22 @@ class VaultCryptoTest {
             chunkSize = chunkSize
         )
 
-        val raf = RandomAccessFile(destFile, "rw")
-        raf.seek(result.headerSize.toLong())
-        val size0 = raf.readInt()
-        val enc0 = ByteArray(size0)
-        raf.readFully(enc0)
+        RandomAccessFile(destFile, "rw").use { raf ->
+            raf.seek(result.headerSize.toLong())
+            val size0 = raf.readInt()
+            val enc0 = ByteArray(size0)
+            raf.readFully(enc0)
 
-        val size1 = raf.readInt()
-        val enc1 = ByteArray(size1)
-        raf.readFully(enc1)
+            val size1 = raf.readInt()
+            val enc1 = ByteArray(size1)
+            raf.readFully(enc1)
 
-        raf.seek(result.headerSize.toLong())
-        raf.writeInt(size1)
-        raf.write(enc1)
-        raf.writeInt(size0)
-        raf.write(enc0)
-        raf.close()
+            raf.seek(result.headerSize.toLong())
+            raf.writeInt(size1)
+            raf.write(enc1)
+            raf.writeInt(size0)
+            raf.write(enc0)
+        }
 
         val outBuffer = ByteArray(chunkSize)
 
@@ -726,11 +748,13 @@ class VaultCryptoTest {
 
     @Test
     fun testPersistentZeroReadsThrowsIOExceptionAndCleansUpTempFile() {
-        val destFile = tempFolder.newFile("stalled_stream.enc")
+        // Use a path that does not create the destination file beforehand.
+        val destFile = File(tempFolder.root, "stalled_stream.enc")
         val tempFile = File(destFile.parentFile, "${destFile.name}.tmp")
 
         val stalledStream = object : java.io.InputStream() {
             private var bytesDelivered = 0
+
             override fun read(): Int {
                 return if (bytesDelivered < 10 * 1024) {
                     bytesDelivered++
