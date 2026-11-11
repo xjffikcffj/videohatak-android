@@ -12,12 +12,12 @@ import com.videohatak.player.core.playback.PlaybackPositionManager
 import com.videohatak.player.core.playback.PlaybackPreferencesRepository
 import com.videohatak.player.core.playback.PlayerUiState
 import com.videohatak.player.core.playback.VideoPlayerManager
-import com.videohatak.player.core.playlist.data.PlaylistRepositoryImpl
-import com.videohatak.player.core.subtitle.SubtitleParser
-import com.videohatak.player.core.subtitle.SubtitlePreferencesRepository
+import com.videohatak.player.core.playlist.repository.PlaylistRepositoryImpl
 import com.videohatak.player.core.subtitle.model.SubtitleTrack
-import com.videohatak.player.feature.player.thumbnail.ThumbnailManager as ThumbnailPreviewManager
-import com.videohatak.player.feature.player.thumbnail.ThumbnailPreviewState
+import com.videohatak.player.core.subtitle.parser.SubtitleParser
+import com.videohatak.player.core.subtitle.repository.SubtitlePreferencesRepository
+import com.videohatak.player.core.thumbnail.manager.ThumbnailPreviewManager
+import com.videohatak.player.core.thumbnail.model.ThumbnailPreviewState
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -105,13 +105,15 @@ class PlayerViewModel(
     val thumbnailPreviewState: StateFlow<ThumbnailPreviewState> =
         safeThumbnailManager?.previewState ?: kotlinx.coroutines.flow.MutableStateFlow(ThumbnailPreviewState())
 
-    val primarySubtitleStyle = safeSubtitlePreferences?.primaryStyle
-        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.videohatak.player.core.subtitle.model.SubtitleStyleConfig())
-        ?: kotlinx.coroutines.flow.MutableStateFlow(com.videohatak.player.core.subtitle.model.SubtitleStyleConfig())
+    val primarySubtitleStyle: StateFlow<com.videohatak.player.core.subtitle.model.SubtitleStyleConfig> =
+        safeSubtitlePreferences?.primaryStyle
+            ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.videohatak.player.core.subtitle.model.SubtitleStyleConfig())
+            ?: kotlinx.coroutines.flow.MutableStateFlow(com.videohatak.player.core.subtitle.model.SubtitleStyleConfig())
 
-    val secondarySubtitleStyle = safeSubtitlePreferences?.secondaryStyle
-        ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.videohatak.player.core.subtitle.model.SubtitleStyleConfig(fontSizeSp = 15f, bottomPaddingDp = 88f))
-        ?: kotlinx.coroutines.flow.MutableStateFlow(com.videohatak.player.core.subtitle.model.SubtitleStyleConfig(fontSizeSp = 15f, bottomPaddingDp = 88f))
+    val secondarySubtitleStyle: StateFlow<com.videohatak.player.core.subtitle.model.SubtitleStyleConfig> =
+        safeSubtitlePreferences?.secondaryStyle
+            ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.videohatak.player.core.subtitle.model.SubtitleStyleConfig(fontSizeSp = 15f, bottomPaddingDp = 88f))
+            ?: kotlinx.coroutines.flow.MutableStateFlow(com.videohatak.player.core.subtitle.model.SubtitleStyleConfig(fontSizeSp = 15f, bottomPaddingDp = 88f))
 
     fun playMedia(uri: Uri, title: String) {
         currentVideo = null // Clear any stale VideoItem reference to avoid URI mismatch

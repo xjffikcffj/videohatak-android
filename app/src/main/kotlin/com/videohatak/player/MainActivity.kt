@@ -167,7 +167,7 @@ class MainActivity : FragmentActivity() {
                 libraryViewModel.onPermissionStatusChanged(initialStatus)
             }
 
-            var activeVideoForPlayback by rememberSaveable(stateSaver = null) {
+            var activeVideoForPlayback by remember {
                 mutableStateOf<VideoItem?>(null)
             }
             activeVideoState = activeVideoForPlayback

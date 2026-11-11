@@ -3,7 +3,7 @@ package com.videohatak.player.core.thumbnail.cache
 import android.graphics.Bitmap
 import android.util.LruCache
 
-class ThumbnailCache(val maxCacheSizeKb: Int = calculateSafeMemoryLimitKb()) {
+class ThumbnailCache(val maxCacheSizeKb: Int = ThumbnailCache.calculateSafeMemoryLimitKb()) {
 
     // Secondary constructor supporting item count if maxSize is passed
     constructor(maxSize: Int) : this(maxCacheSizeKb = (maxSize * 64).coerceAtLeast(1024))

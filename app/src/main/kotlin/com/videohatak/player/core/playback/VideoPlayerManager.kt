@@ -2,6 +2,7 @@ package com.videohatak.player.core.playback
 
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -118,10 +119,6 @@ class VideoPlayerManager internal constructor(
         get() = _exoPlayer ?: synchronized(this) {
             _exoPlayer ?: createExoPlayer().also { _exoPlayer = it }
         }
-
-    init {
-        customExoPlayer?.addListener(playerListener)
-    }
 
     private fun createExoPlayer(): ExoPlayer {
         val nonNullContext = checkNotNull(context) { "Context is required to create a default ExoPlayer instance" }
@@ -259,6 +256,10 @@ class VideoPlayerManager internal constructor(
                 }
             }
         }
+    }
+
+    init {
+        customExoPlayer?.addListener(playerListener)
     }
 
     fun playMedia(uri: Uri, title: String, startPositionMs: Long = 0L) {

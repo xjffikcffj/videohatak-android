@@ -32,19 +32,31 @@ class LibraryViewModel(
     val currentTab = MutableStateFlow(LibraryTab.VIDEOS)
     val selectedFolder = MutableStateFlow<VideoFolder?>(null)
 
+    private data class FilterCriteria(
+        val query: String,
+        val sort: SortOrder,
+        val folder: VideoFolder?
+    )
+
+    private val filterCriteria = combine(
+        searchQuery,
+        sortOrder,
+        selectedFolder
+    ) { query, sort, folder ->
+        FilterCriteria(query, sort, folder)
+    }
+
     val uiState: StateFlow<LibraryUiState> = combine(
         _permissionStatus,
         _isLoading,
         _rawVideos,
-        searchQuery,
-        sortOrder,
-        selectedFolder
-    ) { status, loading, videos, query, sort, folder ->
+        filterCriteria
+    ) { status, loading, videos, criteria ->
         val filtered = videoRepository.filterAndSort(
             videos = videos,
-            query = query,
-            sortOrder = sort.asVideoSortOrder,
-            folderId = folder?.bucketId
+            query = criteria.query,
+            sortOrder = criteria.sort.asVideoSortOrder,
+            folderId = criteria.folder?.bucketId
         )
         val folders = videoRepository.groupIntoFolders(videos)
 

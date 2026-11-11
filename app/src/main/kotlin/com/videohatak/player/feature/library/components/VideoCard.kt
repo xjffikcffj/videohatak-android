@@ -49,7 +49,7 @@ fun VideoCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertiling
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier
