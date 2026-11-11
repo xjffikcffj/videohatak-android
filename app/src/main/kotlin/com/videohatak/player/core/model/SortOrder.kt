@@ -1,3 +1,4 @@
+
 package com.videohatak.player.core.model
 
 enum class VideoSortField(val titleArabic: String) {
@@ -17,7 +18,10 @@ data class VideoSortOrder(
     val direction: SortDirection = SortDirection.DESCENDING
 )
 
-enum class SortOrder(val field: VideoSortField, val direction: SortDirection) {
+enum class SortOrder(
+    val field: VideoSortField,
+    val direction: SortDirection
+) {
     DATE_DESC(VideoSortField.DATE_ADDED, SortDirection.DESCENDING),
     DATE_ASC(VideoSortField.DATE_ADDED, SortDirection.ASCENDING),
     NAME_ASC(VideoSortField.NAME, SortDirection.ASCENDING),
@@ -26,5 +30,5 @@ enum class SortOrder(val field: VideoSortField, val direction: SortDirection) {
     DURATION_DESC(VideoSortField.DURATION, SortDirection.DESCENDING);
 
     val asVideoSortOrder: VideoSortOrder
-        get() = VideoSortOrder(field, direction)
+        get() = VideoSortOrder(this.field, this.direction)
 }
