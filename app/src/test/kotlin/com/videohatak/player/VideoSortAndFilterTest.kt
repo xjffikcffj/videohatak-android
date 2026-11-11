@@ -6,9 +6,9 @@ import com.videohatak.player.core.model.VideoItem
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.junit.runners.JUnit4
+import org.robolectric.RobolectricTestRunner
 
-@RunWith(JUnit4::class)
+@RunWith(RobolectricTestRunner::class)
 class VideoSortAndFilterTest {
 
     private fun makeVideo(
@@ -39,9 +39,9 @@ class VideoSortAndFilterTest {
     }
 
     private val sampleVideos = listOf(
-        makeVideo(id = 1, title = "Alpha", durationMs = 30000L, sizeBytes = 1000L, dateAddedSec = 100L),
-        makeVideo(id = 2, title = "Beta", durationMs = 60000L, sizeBytes = 5000L, dateAddedSec = 300L),
-        makeVideo(id = 3, title = "Gamma", durationMs = 15000L, sizeBytes = 2000L, dateAddedSec = 200L, bucketId = "bucket_2", bucketName = "Downloads")
+        makeVideo(1, "Alpha", 30000L, 1000L, 100L),
+        makeVideo(2, "Beta", 60000L, 5000L, 300L),
+        makeVideo(3, "Gamma", 15000L, 2000L, 200L, "bucket_2", "Downloads")
     )
 
     @Test
@@ -79,7 +79,9 @@ class VideoSortAndFilterTest {
     @Test
     fun testSearchFiltering() {
         val query = "alp"
-        val filtered = sampleVideos.filter { it.safeTitle.lowercase().contains(query) }
+        val filtered = sampleVideos.filter {
+            it.safeTitle.lowercase().contains(query)
+        }
         assertEquals(1, filtered.size)
         assertEquals("Alpha", filtered.first().safeTitle)
     }
