@@ -1,3 +1,4 @@
+
 package com.videohatak.player
 
 import android.app.Application
@@ -18,6 +19,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -298,10 +300,10 @@ class PlaybackIntegrationTest {
             id = 1001L,
             contentUri = videoUri,
             displayName = "Integ Test Video",
-            safeTitle = "Integ Test Video",
+            title = "Integ Test Video",
             durationMs = 120_000L,
             sizeBytes = 10_000_000L,
-            dateAddedSeconds = 1700000000L
+            dateAddedSec = 1700000000L
         )
 
         viewModel.playVideo(videoItem)
@@ -351,10 +353,10 @@ class PlaybackIntegrationTest {
             id = 1002L,
             contentUri = videoUri,
             displayName = "Order Test",
-            safeTitle = "Order Test",
+            title = "Order Test",
             durationMs = 120_000L,
             sizeBytes = 10_000_000L,
-            dateAddedSeconds = 1700000000L
+            dateAddedSec = 1700000000L
         )
         viewModel.playVideo(videoItem)
 
@@ -382,8 +384,8 @@ class PlaybackIntegrationTest {
         val playerManager = VideoPlayerManager.createForTesting(fakePlayer.exoPlayer)
 
         val sharedUri = Uri.parse("content://media/external/video/media/same_item")
-        val item0 = VideoItem(id = 555L, contentUri = sharedUri, displayName = "Same 0", safeTitle = "Same 0", durationMs = 60_000L, sizeBytes = 1000L, dateAddedSeconds = 1L)
-        val item1 = VideoItem(id = 555L, contentUri = sharedUri, displayName = "Same 1", safeTitle = "Same 1", durationMs = 60_000L, sizeBytes = 1000L, dateAddedSeconds = 1L)
+        val item0 = VideoItem(id = 555L, contentUri = sharedUri, displayName = "Same 0", title = "Same 0", durationMs = 60_000L, sizeBytes = 1000L, dateAddedSec = 1L)
+        val item1 = VideoItem(id = 555L, contentUri = sharedUri, displayName = "Same 1", title = "Same 1", durationMs = 60_000L, sizeBytes = 1000L, dateAddedSec = 1L)
 
         // 1. Start playlist with duplicate item at indices 0 and 1
         playerManager.playPlaylist(listOf(item0, item1), startIndex = 0)
@@ -487,7 +489,7 @@ class PlaybackIntegrationTest {
         val playerManager = VideoPlayerManager.createForTesting(fakePlayer.exoPlayer)
 
         val uri = Uri.parse("content://media/external/video/media/init_gen_test")
-        val item = VideoItem(id = 888L, contentUri = uri, displayName = "Single Item", safeTitle = "Single Item", durationMs = 50_000L, sizeBytes = 1000L, dateAddedSeconds = 1L)
+        val item = VideoItem(id = 888L, contentUri = uri, displayName = "Single Item", title = "Single Item", durationMs = 50_000L, sizeBytes = 1000L, dateAddedSec = 1L)
 
         // Start playlist at index 0
         playerManager.playPlaylist(listOf(item), startIndex = 0)
@@ -545,10 +547,10 @@ class PlaybackIntegrationTest {
             id = 777L,
             contentUri = videoUri,
             displayName = "No Redundant Saves",
-            safeTitle = "No Redundant Saves",
+            title = "No Redundant Saves",
             durationMs = 100_000L,
             sizeBytes = 10_000_000L,
-            dateAddedSeconds = 1700000000L
+            dateAddedSec = 1700000000L
         )
         viewModel.playVideo(videoItem)
 
@@ -607,10 +609,10 @@ class PlaybackIntegrationTest {
             id = 999L,
             contentUri = videoUri,
             displayName = "Repeat One Test Video",
-            safeTitle = "Repeat One Test Video",
+            title = "Repeat One Test Video",
             durationMs = 120_000L,
             sizeBytes = 10_000_000L,
-            dateAddedSeconds = 1700000000L
+            dateAddedSec = 1700000000L
         )
 
         // Precondition: video has a saved position (55,000ms) in DataStore from earlier session
@@ -685,8 +687,8 @@ class PlaybackIntegrationTest {
         realRepo.saveVideoPosition(uriA.toString(), 15_000L, 100_000L)
         realRepo.saveVideoPosition(uriB.toString(), 40_000L, 100_000L)
 
-        val itemA = VideoItem(id = 111L, contentUri = uriA, displayName = "A", safeTitle = "A", durationMs = 100_000L, sizeBytes = 1000L, dateAddedSeconds = 1L)
-        val itemB = VideoItem(id = 222L, contentUri = uriB, displayName = "B", safeTitle = "B", durationMs = 100_000L, sizeBytes = 1000L, dateAddedSeconds = 1L)
+        val itemA = VideoItem(id = 111L, contentUri = uriA, displayName = "A", title = "A", durationMs = 100_000L, sizeBytes = 1000L, dateAddedSec = 1L)
+        val itemB = VideoItem(id = 222L, contentUri = uriB, displayName = "B", title = "B", durationMs = 100_000L, sizeBytes = 1000L, dateAddedSec = 1L)
 
         val fakePlayer = FakeExoPlayer().apply {
             duration = 100_000L
@@ -742,8 +744,8 @@ class PlaybackIntegrationTest {
         // 3. Assert ExoPlayer currentPosition equals 40_000ms
         assertEquals("ExoPlayer position must equal 40,000ms for Video B", 40_000L, fakePlayer.currentPosition)
 
-        // 4. Assert ViewModel / UI state currentPositionMs equals 40_000ms
-        assertEquals("ViewModel UI state currentPositionMs must equal 40,000ms for Video B", 40_000L, viewModel.uiState.value.currentPositionMs)
+        // 4. Assert ViewModel / UI state currentPositionMs equals 40_000ms for Video B
+        assertEquals("ViewModel UI state currentPositionMs must equal 40_000ms for Video B", 40_000L, viewModel.uiState.value.currentPositionMs)
 
         // 5. Assert Video A's position (15_000ms) is NOT applied to Video B
         assertTrue("Video A position (15_000ms) must NOT be applied to Video B", fakePlayer.currentPosition != 15_000L)
