@@ -20,7 +20,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
@@ -433,7 +435,7 @@ class PlaybackIntegrationTest {
 
         val fakePlayer = FakeExoPlayer().apply {
             duration = 0L
-            currentPosition = 47_300L
+            currentPosition = 0L
             isPlaying = true
         }
         val playerManager = VideoPlayerManager.createForTesting(fakePlayer.exoPlayer)
@@ -444,6 +446,10 @@ class PlaybackIntegrationTest {
 
         val videoUri = Uri.parse("content://media/external/video/media/pause_zero_dur")
         playerManager.playMedia(videoUri, "Zero Duration Video")
+
+        // playMedia() sets the new media position to startPositionMs (0L).
+        // Set the simulated playback position only after starting the media.
+        fakePlayer.currentPosition = 47_300L
 
         playerManager.pause()
 
@@ -667,6 +673,16 @@ class PlaybackIntegrationTest {
 
         viewModel.playVideo(itemA)
         testDispatcher.scheduler.advanceUntilIdle()
+
+        // Wait for the asynchronous DataStore read and restoration of Video A.
+        // DataStore performs disk work off the test scheduler.
+        withTimeout(5_000L) {
+            while (fakePlayer.currentPosition != 15_000L) {
+                testDispatcher.scheduler.advanceUntilIdle()
+                delay(10L)
+            }
+        }
+
         fakePlayer.triggerPlaybackStateChanged(Player.STATE_READY)
         testDispatcher.scheduler.advanceUntilIdle()
 
@@ -678,18 +694,48 @@ class PlaybackIntegrationTest {
         fakePlayer.currentPosition = 0L
         fakePlayer.duration = 100_000L
         fakePlayer.playbackState = Player.STATE_READY
+
         val mediaItemB = MediaItem.Builder().setMediaId("222").setUri(uriB).build()
-        playerManager.playerListener.onMediaItemTransition(mediaItemB, Player.MEDIA_ITEM_TRANSITION_REASON_AUTO)
+        playerManager.playerListener.onMediaItemTransition(
+            mediaItemB,
+            Player.MEDIA_ITEM_TRANSITION_REASON_AUTO
+        )
+
         testDispatcher.scheduler.advanceUntilIdle()
+
+        // Wait until the ViewModel finishes the IO-backed lookup and applies B's saved position.
+        withTimeout(5_000L) {
+            while (!fakePlayer.seekCalls.contains(40_000L)) {
+                testDispatcher.scheduler.advanceUntilIdle()
+                delay(10L)
+            }
+        }
 
         fakePlayer.triggerPlaybackStateChanged(Player.STATE_READY)
         testDispatcher.scheduler.advanceUntilIdle()
 
-        assertTrue("Normal transition to new item must trigger DataStore restoration query", restorationQueriesCount.get() > queriesAfterA)
-        assertTrue("seekTo must be executed on FakeExoPlayer with position 40,000ms", fakePlayer.seekCalls.contains(40_000L))
-        assertEquals("ExoPlayer position must equal 40,000ms for Video B", 40_000L, fakePlayer.currentPosition)
-        assertEquals("ViewModel UI state currentPositionMs must equal 40,000ms for Video B", 40_000L, viewModel.uiState.value.currentPositionMs)
-        assertTrue("Video A position (15,000ms) must NOT be applied to Video B", fakePlayer.currentPosition != 15_000L)
+        assertTrue(
+            "Normal transition to new item must trigger DataStore restoration query",
+            restorationQueriesCount.get() > queriesAfterA
+        )
+        assertTrue(
+            "seekTo must be executed on FakeExoPlayer with position 40,000ms",
+            fakePlayer.seekCalls.contains(40_000L)
+        )
+        assertEquals(
+            "ExoPlayer position must equal 40,000ms for Video B",
+            40_000L,
+            fakePlayer.currentPosition
+        )
+        assertEquals(
+            "ViewModel UI state currentPositionMs must equal 40,000ms for Video B",
+            40_000L,
+            viewModel.uiState.value.currentPositionMs
+        )
+        assertTrue(
+            "Video A position (15,000ms) must NOT be applied to Video B",
+            fakePlayer.currentPosition != 15_000L
+        )
         assertEquals(uriB, viewModel.uiState.value.mediaUri)
     }
 }
