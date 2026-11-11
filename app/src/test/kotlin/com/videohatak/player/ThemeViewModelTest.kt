@@ -1,3 +1,4 @@
+
 package com.videohatak.player
 
 import com.videohatak.player.core.designsystem.theme.ThemeMode
@@ -8,8 +9,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
@@ -26,6 +29,7 @@ class ThemeViewModelTest {
 
     private class FakeThemePreferencesRepository : ThemePreferencesRepository {
         val flow = MutableStateFlow(ThemeMode.SYSTEM)
+
         override val themeModeFlow: Flow<ThemeMode> = flow
 
         override suspend fun setThemeMode(mode: ThemeMode) {
@@ -50,39 +54,84 @@ class ThemeViewModelTest {
     fun defaultState_loadsFromRepository() = runTest(testDispatcher) {
         val viewModel = ThemeViewModel(fakeRepository)
 
-        // Advance dispatcher to collect the initial flow emission
+        backgroundScope.launch(
+            UnconfinedTestDispatcher(testScheduler)
+        ) {
+            viewModel.themeState.collect {}
+        }
+
         testDispatcher.scheduler.advanceUntilIdle()
 
         val state = viewModel.themeState.value
-        assertTrue("Expected ThemeState.Success but was $state", state is ThemeState.Success)
-        assertEquals(ThemeMode.SYSTEM, (state as ThemeState.Success).themeMode)
+
+        assertTrue(
+            "Expected ThemeState.Success but was $state",
+            state is ThemeState.Success
+        )
+
+        assertEquals(
+            ThemeMode.SYSTEM,
+            (state as ThemeState.Success).themeMode
+        )
     }
 
     @Test
     fun setThemeMode_updatesRepositoryAndState() = runTest(testDispatcher) {
         val viewModel = ThemeViewModel(fakeRepository)
+
+        backgroundScope.launch(
+            UnconfinedTestDispatcher(testScheduler)
+        ) {
+            viewModel.themeState.collect {}
+        }
+
         testDispatcher.scheduler.advanceUntilIdle()
 
         viewModel.setThemeMode(ThemeMode.DARK)
         testDispatcher.scheduler.advanceUntilIdle()
 
         val state = viewModel.themeState.value
+
         assertTrue(state is ThemeState.Success)
-        assertEquals(ThemeMode.DARK, (state as ThemeState.Success).themeMode)
-        assertEquals(ThemeMode.DARK, fakeRepository.flow.value)
+
+        assertEquals(
+            ThemeMode.DARK,
+            (state as ThemeState.Success).themeMode
+        )
+
+        assertEquals(
+            ThemeMode.DARK,
+            fakeRepository.flow.value
+        )
     }
 
     @Test
     fun setThemeMode_switchToLight_updatesCorrectly() = runTest(testDispatcher) {
         val viewModel = ThemeViewModel(fakeRepository)
+
+        backgroundScope.launch(
+            UnconfinedTestDispatcher(testScheduler)
+        ) {
+            viewModel.themeState.collect {}
+        }
+
         testDispatcher.scheduler.advanceUntilIdle()
 
         viewModel.setThemeMode(ThemeMode.LIGHT)
         testDispatcher.scheduler.advanceUntilIdle()
 
         val state = viewModel.themeState.value
+
         assertTrue(state is ThemeState.Success)
-        assertEquals(ThemeMode.LIGHT, (state as ThemeState.Success).themeMode)
-        assertEquals(ThemeMode.LIGHT, fakeRepository.flow.value)
+
+        assertEquals(
+            ThemeMode.LIGHT,
+            (state as ThemeState.Success).themeMode
+        )
+
+        assertEquals(
+            ThemeMode.LIGHT,
+            fakeRepository.flow.value
+        )
     }
 }
