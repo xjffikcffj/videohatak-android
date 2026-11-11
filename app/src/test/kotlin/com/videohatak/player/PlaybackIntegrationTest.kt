@@ -32,7 +32,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.junit.runners.JUnit4
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 import java.io.File
 import java.lang.reflect.InvocationHandler
 import java.lang.reflect.Method
@@ -48,7 +49,8 @@ import java.lang.reflect.Proxy
  * - Real DataStore persistence on disk
  */
 @OptIn(ExperimentalCoroutinesApi::class)
-@RunWith(JUnit4::class)
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
 class PlaybackIntegrationTest {
 
     private val tempFiles = mutableListOf<File>()
@@ -170,9 +172,7 @@ class PlaybackIntegrationTest {
                     null
                 }
                 "getShuffleModeEnabled" -> shuffleModeEnabled
-                "prepare" -> {
-                    null
-                }
+                "prepare" -> null
                 "setPlayWhenReady" -> {
                     playWhenReady = nonNullArgs[0] as Boolean
                     null
@@ -307,18 +307,13 @@ class PlaybackIntegrationTest {
         )
 
         viewModel.playVideo(videoItem)
-
-        // User scrubs and releases at 85_400ms
         viewModel.onScrubStop(85_400L)
 
-        // Verify ExoPlayer seek was triggered
         assertEquals(85_400L, fakePlayer.currentPosition)
         assertEquals(85_400L, viewModel.uiState.value.currentPositionMs)
 
-        // Flush to real disk DataStore
         assertTrue(posManager.flushPending(timeoutMs = 2000L))
 
-        // Verify position persisted on disk in DataStore
         val saved = realRepo.getSavedVideoPosition(videoUri.toString(), 120_000L)
         assertEquals("DataStore must contain the exact scrub-stop position", 85_400L, saved)
     }
@@ -360,17 +355,13 @@ class PlaybackIntegrationTest {
         )
         viewModel.playVideo(videoItem)
 
-        // 1. Simulating older periodic update arrived earlier with position 12_000ms
         val periodicReq = posManager.enqueueSave(videoUri.toString(), 12_000L, 120_000L)
         assertNotNull(periodicReq)
 
-        // 2. User finishes scrub to 92_000ms via ViewModel
         viewModel.onScrubStop(92_000L)
 
-        // 3. Ensure both requests processed and written
         assertTrue(posManager.flushPending(timeoutMs = 2000L))
 
-        // 4. Position on disk MUST be 92_000ms (newer sequence strictly won over older periodic save)
         val persisted = realRepo.getSavedVideoPosition(videoUri.toString(), 120_000L)
         assertEquals("Persisted position must be the scrubbed 92,000ms, not the older periodic save", 92_000L, persisted)
     }
@@ -387,24 +378,19 @@ class PlaybackIntegrationTest {
         val item0 = VideoItem(id = 555L, contentUri = sharedUri, displayName = "Same 0", title = "Same 0", durationMs = 60_000L, sizeBytes = 1000L, dateAddedSec = 1L)
         val item1 = VideoItem(id = 555L, contentUri = sharedUri, displayName = "Same 1", title = "Same 1", durationMs = 60_000L, sizeBytes = 1000L, dateAddedSec = 1L)
 
-        // 1. Start playlist with duplicate item at indices 0 and 1
         playerManager.playPlaylist(listOf(item0, item1), startIndex = 0)
         assertEquals("Initial generation after playPlaylist must be 1", 1L, playerManager.getCurrentPlaybackGeneration())
 
-        // 2. Initial ExoPlayer transition callback for index 0
         fakePlayer.currentMediaItemIndex = 0
         val mediaItem0 = MediaItem.Builder().setMediaId("555").setUri(sharedUri).build()
         playerManager.playerListener.onMediaItemTransition(mediaItem0, Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED)
 
-        // Generation must remain 1 (no double increment)
         assertEquals("Generation must remain 1 after initial transition", 1L, playerManager.getCurrentPlaybackGeneration())
 
-        // 3. Player advances to index 1 (same mediaId 555, but at index 1)
         fakePlayer.currentMediaItemIndex = 1
         val mediaItem1 = MediaItem.Builder().setMediaId("555").setUri(sharedUri).build()
         playerManager.playerListener.onMediaItemTransition(mediaItem1, Player.MEDIA_ITEM_TRANSITION_REASON_AUTO)
 
-        // Because of index disambiguation (555_#0 vs 555_#1), generation MUST advance to 2!
         assertEquals("Playback generation must increment on transition to same media at index 1", 2L, playerManager.getCurrentPlaybackGeneration())
     }
 
@@ -422,22 +408,16 @@ class PlaybackIntegrationTest {
         playerManager.playMedia(uri, "Repeat Video")
         assertEquals(1L, playerManager.getCurrentPlaybackGeneration())
 
-        // Initial transition
         fakePlayer.currentMediaItemIndex = 0
         playerManager.playerListener.onMediaItemTransition(mediaItem, Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED)
         assertEquals(1L, playerManager.getCurrentPlaybackGeneration())
 
-        // Apply restoration for cycle 1
         playerManager.seekTo(30_000L)
         assertTrue("Restoration applied must be true after manual seek in cycle 1", playerManager.restorationCoordinator.isRestorationApplied)
 
-        // Repeat One loops the exact same item at index 0 with REASON_REPEAT
         playerManager.playerListener.onMediaItemTransition(mediaItem, Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT)
 
-        // Generation must increment to 2
         assertEquals("Generation must increment to 2 on Repeat One loop", 2L, playerManager.getCurrentPlaybackGeneration())
-
-        // isRestorationApplied MUST reset to false so cycle 1 position is not falsely carried over
         assertFalse("Restoration applied flag must reset to false for the new loop cycle", playerManager.restorationCoordinator.isRestorationApplied)
     }
 
@@ -452,13 +432,12 @@ class PlaybackIntegrationTest {
         val posManager = createManager(realRepo, scope)
 
         val fakePlayer = FakeExoPlayer().apply {
-            duration = 0L // Unknown duration (e.g. live stream or early preparation)
+            duration = 0L
             currentPosition = 47_300L
             isPlaying = true
         }
         val playerManager = VideoPlayerManager.createForTesting(fakePlayer.exoPlayer)
 
-        // Connect VideoPlayerManager periodic position update to positionManager
         playerManager.onPeriodicPositionUpdate = { uri, pos, dur ->
             posManager.enqueueSave(uri, pos, dur)
         }
@@ -466,16 +445,12 @@ class PlaybackIntegrationTest {
         val videoUri = Uri.parse("content://media/external/video/media/pause_zero_dur")
         playerManager.playMedia(videoUri, "Zero Duration Video")
 
-        // Trigger pause
         playerManager.pause()
 
-        // Verify pause commanded ExoPlayer
         assertFalse(fakePlayer.isPlaying)
 
-        // Flush pending save to real DataStore
         assertTrue("Flush must succeed for 0L duration pause save", posManager.flushPending(timeoutMs = 2000L))
 
-        // Verify DataStore contains the raw position
         val storedPos = realRepo.getSavedVideoPosition(videoUri.toString(), durationMs = 0L)
         assertEquals("Position on pause with duration 0L must be preserved in DataStore", 47_300L, storedPos)
     }
@@ -491,17 +466,14 @@ class PlaybackIntegrationTest {
         val uri = Uri.parse("content://media/external/video/media/init_gen_test")
         val item = VideoItem(id = 888L, contentUri = uri, displayName = "Single Item", title = "Single Item", durationMs = 50_000L, sizeBytes = 1000L, dateAddedSec = 1L)
 
-        // Start playlist at index 0
         playerManager.playPlaylist(listOf(item), startIndex = 0)
         val initialGen = playerManager.getCurrentPlaybackGeneration()
         assertEquals(1L, initialGen)
 
-        // ExoPlayer reports transition for the already registered item at index 0
         fakePlayer.currentMediaItemIndex = 0
         val mediaItem = MediaItem.Builder().setMediaId("888").setUri(uri).build()
         playerManager.playerListener.onMediaItemTransition(mediaItem, Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED)
 
-        // Generation must remain 1
         assertEquals("Generation must remain 1 and NOT increment a second time on initial transition", 1L, playerManager.getCurrentPlaybackGeneration())
     }
 
@@ -514,7 +486,6 @@ class PlaybackIntegrationTest {
         val (dataStore, _) = createRealDataStore(scope)
         val realRepo = PlaybackPreferencesRepositoryImpl(dataStore)
 
-        // Wrapper to track actual saveVideoPosition executions on DataStore
         val saveCallsCount = java.util.concurrent.atomic.AtomicInteger(0)
         val savedPositionsList = java.util.concurrent.CopyOnWriteArrayList<Long>()
         val countingRepo = object : PlaybackPreferencesRepository by realRepo {
@@ -557,28 +528,22 @@ class PlaybackIntegrationTest {
         val initialSeq = posManager.getCurrentSequenceNumber()
         val initialWrites = saveCallsCount.get()
 
-        // 1. User drags scrubber across multiple positions
         viewModel.onScrubStart(10_000L, 0.10f)
         viewModel.onScrubProgress(20_000L, 0.20f)
         viewModel.onScrubProgress(30_000L, 0.30f)
         viewModel.onScrubProgress(40_000L, 0.40f)
         viewModel.onScrubProgress(50_000L, 0.50f)
 
-        // Crucial guarantee 1: ZERO save requests were enqueued during active scrubbing
         assertTrue("Channel must not have received any save requests during active scrubbing", posManager.saveChannel.tryReceive().isFailure)
         assertEquals("Sequence counter must not advance during active scrubbing", initialSeq, posManager.getCurrentSequenceNumber())
         assertEquals("No DataStore save calls must be made during active scrubbing", initialWrites, saveCallsCount.get())
 
-        // 2. User releases scrubber at 65_000ms
         viewModel.onScrubStop(65_000L)
 
-        // Crucial guarantee 2: Sequence counter incremented by exactly 1
         assertEquals("Exactly ONE save sequence was generated upon scrub stop", initialSeq + 1, posManager.getCurrentSequenceNumber())
 
-        // 3. Flush pending writes to DataStore
         assertTrue(posManager.flushPending(timeoutMs = 2000L))
 
-        // Crucial guarantee 3: Exactly ONE save call was dispatched to DataStore repository in total
         assertEquals("Exactly ONE save write was committed to DataStore repository", initialWrites + 1, saveCallsCount.get())
         assertEquals("Saved position must match final scrub position", listOf(65_000L), savedPositionsList.toList())
 
@@ -615,7 +580,6 @@ class PlaybackIntegrationTest {
             dateAddedSec = 1700000000L
         )
 
-        // Precondition: video has a saved position (55,000ms) in DataStore from earlier session
         realRepo.saveVideoPosition(videoUri.toString(), 55_000L, 120_000L)
         assertEquals(55_000L, realRepo.getSavedVideoPosition(videoUri.toString(), 120_000L))
 
@@ -635,29 +599,21 @@ class PlaybackIntegrationTest {
             thumbnailManager = null
         )
 
-        // 1. Initial play of video: triggers initial restoration query
         viewModel.playVideo(videoItem)
         testDispatcher.scheduler.advanceUntilIdle()
 
         val initialQueries = restorationQueriesCount.get()
         assertTrue("Initial playback should query saved position", initialQueries >= 1)
 
-        // 2. Video plays, reaches end, and ExoPlayer triggers Repeat One loop
         fakePlayer.currentPosition = 0L
         fakePlayer.currentMediaItemIndex = 0
         val mediaItem = MediaItem.Builder().setMediaId("999").setUri(videoUri).build()
 
-        // Trigger Repeat One transition in ExoPlayer
         playerManager.playerListener.onMediaItemTransition(mediaItem, Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT)
         testDispatcher.scheduler.advanceUntilIdle()
 
-        // 3. Playback generation must increment on Repeat One
         assertEquals("Playback generation must increment on Repeat One loop", 2L, playerManager.getCurrentPlaybackGeneration())
-
-        // 4. Crucial check: Repeat One must NOT trigger additional DataStore restoration queries
         assertEquals("Repeat One must not trigger additional DataStore restoration queries", initialQueries, restorationQueriesCount.get())
-
-        // 5. Crucial check: Player and UI state must start at 0L, NOT snap back to 55,000ms
         assertEquals("ExoPlayer position must remain 0L at start of Repeat One loop", 0L, fakePlayer.currentPosition)
         assertEquals("ViewModel UI state current position must be 0L at start of Repeat One loop", 0L, viewModel.uiState.value.currentPositionMs)
     }
@@ -683,7 +639,6 @@ class PlaybackIntegrationTest {
         val uriA = Uri.parse("content://media/external/video/media/repeat_all_A")
         val uriB = Uri.parse("content://media/external/video/media/repeat_all_B")
 
-        // Precondition: Item A has saved position 15_000ms, Item B has saved position 40_000ms
         realRepo.saveVideoPosition(uriA.toString(), 15_000L, 100_000L)
         realRepo.saveVideoPosition(uriB.toString(), 40_000L, 100_000L)
 
@@ -706,23 +661,19 @@ class PlaybackIntegrationTest {
             thumbnailManager = null
         )
 
-        // Setup playlist items in ViewModel
         val playlistField = PlayerViewModel::class.java.getDeclaredField("playlistVideos")
         playlistField.isAccessible = true
         playlistField.set(viewModel, listOf(itemA, itemB))
 
-        // Initial play on Item A
         viewModel.playVideo(itemA)
         testDispatcher.scheduler.advanceUntilIdle()
         fakePlayer.triggerPlaybackStateChanged(Player.STATE_READY)
         testDispatcher.scheduler.advanceUntilIdle()
 
-        // Verify Item A restored to its saved position (15_000ms)
         assertEquals(15_000L, fakePlayer.currentPosition)
         assertEquals(15_000L, viewModel.uiState.value.currentPositionMs)
         val queriesAfterA = restorationQueriesCount.get()
 
-        // Transition to Item B (AUTO transition as part of Repeat ALL or playlist advance)
         fakePlayer.currentMediaItemIndex = 1
         fakePlayer.currentPosition = 0L
         fakePlayer.duration = 100_000L
@@ -731,24 +682,14 @@ class PlaybackIntegrationTest {
         playerManager.playerListener.onMediaItemTransition(mediaItemB, Player.MEDIA_ITEM_TRANSITION_REASON_AUTO)
         testDispatcher.scheduler.advanceUntilIdle()
 
-        // Simulate ExoPlayer reaching STATE_READY for Item B
         fakePlayer.triggerPlaybackStateChanged(Player.STATE_READY)
         testDispatcher.scheduler.advanceUntilIdle()
 
-        // 1. Assert DataStore restoration query was launched for Item B
         assertTrue("Normal transition to new item must trigger DataStore restoration query", restorationQueriesCount.get() > queriesAfterA)
-
-        // 2. Assert seekTo was executed on ExoPlayer with the restored position of Item B (40_000ms)
         assertTrue("seekTo must be executed on FakeExoPlayer with position 40,000ms", fakePlayer.seekCalls.contains(40_000L))
-
-        // 3. Assert ExoPlayer currentPosition equals 40_000ms
         assertEquals("ExoPlayer position must equal 40,000ms for Video B", 40_000L, fakePlayer.currentPosition)
-
-        // 4. Assert ViewModel / UI state currentPositionMs equals 40_000ms for Video B
-        assertEquals("ViewModel UI state currentPositionMs must equal 40_000ms for Video B", 40_000L, viewModel.uiState.value.currentPositionMs)
-
-        // 5. Assert Video A's position (15_000ms) is NOT applied to Video B
-        assertTrue("Video A position (15_000ms) must NOT be applied to Video B", fakePlayer.currentPosition != 15_000L)
+        assertEquals("ViewModel UI state currentPositionMs must equal 40,000ms for Video B", 40_000L, viewModel.uiState.value.currentPositionMs)
+        assertTrue("Video A position (15,000ms) must NOT be applied to Video B", fakePlayer.currentPosition != 15_000L)
         assertEquals(uriB, viewModel.uiState.value.mediaUri)
     }
 }
