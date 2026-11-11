@@ -1,3 +1,4 @@
+
 package com.videohatak.player
 
 import com.videohatak.player.core.vault.crypto.VaultCryptoManager
@@ -56,10 +57,9 @@ class VaultCryptoTest {
     fun testDekEnvelopeWrappingAndUnwrapping() {
         val dek = cryptoManager.generateDataEncryptionKey()
         assertEquals("AES", dek.algorithm)
-        assertEquals(32, dek.encoded.size) // 256 bits
+        assertEquals(32, dek.encoded.size)
 
         val wrapped = cryptoManager.wrapDataKey(dek)
-        // 12 bytes IV + 32 bytes ciphertext + 16 bytes tag = 60 bytes
         assertEquals(60, wrapped.size)
 
         val unwrapped = cryptoManager.unwrapDataKey(wrapped)
@@ -74,12 +74,10 @@ class VaultCryptoTest {
         val nonce = cryptoManager.deriveChunkNonce(fileSalt, chunkIndex)
         assertEquals(12, nonce.size)
 
-        // First 8 bytes must match fileSalt exactly
         for (i in 0 until 8) {
             assertEquals(fileSalt[i], nonce[i])
         }
 
-        // Last 4 bytes must match big-endian chunkIndex
         assertEquals(0x01.toByte(), nonce[8])
         assertEquals(0x02.toByte(), nonce[9])
         assertEquals(0x03.toByte(), nonce[10])
@@ -114,9 +112,8 @@ class VaultCryptoTest {
 
         assertEquals(plainBytes.size.toLong(), result.plaintextSizeBytes)
         assertTrue(destFile.exists())
-        assertTrue(destFile.length() > plainBytes.size) // header + ciphertext + GCM tag
+        assertTrue(destFile.length() > plainBytes.size)
 
-        // Read decrypted range
         val outBuffer = ByteArray(plainBytes.size)
         val readBytes = cryptoManager.readDecryptedRange(
             encryptedFile = destFile,
@@ -137,7 +134,6 @@ class VaultCryptoTest {
 
     @Test
     fun testMultiChunkEncryptionAndCrossChunkSeeking() {
-        // Create 150 KB of deterministic test payload (> 2 chunks of 64 KB)
         val chunkSize = 64 * 1024
         val totalSize = 150 * 1024
         val testPayload = ByteArray(totalSize)
@@ -155,7 +151,6 @@ class VaultCryptoTest {
 
         assertEquals(totalSize.toLong(), result.plaintextSizeBytes)
 
-        // Read range crossing chunk 0, chunk 1, and chunk 2 (e.g. from 60 KB to 140 KB = 80 KB)
         val seekOffset = 60 * 1024L
         val readLength = 80 * 1024
         val outBuffer = ByteArray(readLength)
@@ -183,7 +178,7 @@ class VaultCryptoTest {
     fun testRandomAccessSeekingAtArbitraryOffset() {
         val testPayload = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".repeat(2000).toByteArray()
         val destFile = tempFolder.newFile("test_seek.enc")
-        val chunkSize = 1024 // 1 KB chunks for multi-chunk boundaries
+        val chunkSize = 1024
 
         val result = cryptoManager.encryptStream(
             inputStream = ByteArrayInputStream(testPayload),
@@ -192,7 +187,6 @@ class VaultCryptoTest {
             chunkSize = chunkSize
         )
 
-        // Arbitrary seek offset: 2555, read 50 bytes
         val offset = 2555L
         val length = 50
         val outBuffer = ByteArray(length)
@@ -227,7 +221,6 @@ class VaultCryptoTest {
             chunkSize = 64 * 1024
         )
 
-        // Corrupt one single byte in the ciphertext chunk
         val raf = RandomAccessFile(destFile, "rw")
         raf.seek(result.headerSize.toLong() + 5L)
         val b = raf.readByte()
@@ -308,20 +301,18 @@ class VaultCryptoTest {
             outBufferOffset = 0,
             requestedLength = 10
         )
-        assertEquals(-1, read) // EOF
+        assertEquals(-1, read)
     }
 
     @Test
     fun testInactivityTimeoutLogic() {
-        val timeoutMs = 3 * 60 * 1000L // 3 minutes
+        val timeoutMs = 3 * 60 * 1000L
         val now = 1_000_000L
 
-        // Active 1 minute ago -> Not timed out
         val recentInteraction = now - (60 * 1000L)
         val isTimedOutRecent = (now - recentInteraction) > timeoutMs
         assertFalse(isTimedOutRecent)
 
-        // Active 4 minutes ago -> Timed out
         val oldInteraction = now - (4 * 60 * 1000L)
         val isTimedOutOld = (now - oldInteraction) > timeoutMs
         assertTrue(isTimedOutOld)
@@ -344,10 +335,10 @@ class VaultCryptoTest {
 
         val item = vaultVideo.toVideoItem()
         assertEquals(42L, item.id)
-        assertEquals("vault://videos/vault_42.enc", item.uri)
+        assertEquals("vault://videos/vault_42.enc", item.contentUri.toString())
         assertEquals("وثائقي_سري.mp4", item.title)
         assertEquals("secure_vault", item.bucketId)
-        assertEquals("الخزنة الخاصة", item.bucketName)
+        assertEquals("الخزنة الخاصة", item.bucketDisplayName)
         assertEquals(120_000L, item.durationMs)
         assertEquals(1920, item.width)
         assertEquals(1080, item.height)
@@ -355,10 +346,9 @@ class VaultCryptoTest {
 
     @Test
     fun testPartialStreamReadingAccumulatesFullChunks() {
-        val totalSize = 130 * 1024 // 2 full chunks (64KB each) + 2KB final chunk
+        val totalSize = 130 * 1024
         val payload = ByteArray(totalSize) { (it % 253).toByte() }
 
-        // InputStream that yields at most 512 bytes per read
         val irregularStream = object : java.io.InputStream() {
             private var index = 0
             override fun read(): Int {
@@ -383,7 +373,6 @@ class VaultCryptoTest {
 
         assertEquals(totalSize.toLong(), result.plaintextSizeBytes)
 
-        // Verify seek read across chunk boundary (from 60KB to 70KB)
         val readBuffer = ByteArray(10 * 1024)
         val readCount = cryptoManager.readDecryptedRange(
             encryptedFile = destFile,
@@ -415,7 +404,6 @@ class VaultCryptoTest {
             chunkSize = 64 * 1024
         )
 
-        // Alter fileSalt in header (at offset 8: MAGIC is 8 bytes, salt is 8 bytes)
         val raf = RandomAccessFile(destFile, "rw")
         raf.seek(9L)
         val b = raf.readByte()
@@ -454,7 +442,6 @@ class VaultCryptoTest {
             chunkSize = 64 * 1024
         )
 
-        // Alter plaintextSize in header (last 8 bytes of header)
         val raf = RandomAccessFile(destFile, "rw")
         raf.seek(result.headerSize.toLong() - 4L)
         val b = raf.readByte()
@@ -493,20 +480,17 @@ class VaultCryptoTest {
     @Test
     fun testBackwardCompatibilityUnwrapWithoutAad() {
         val dek = cryptoManager.generateDataEncryptionKey()
-        // Wrap without AAD (legacy style)
         val wrappedLegacy = cryptoManager.wrapDataKey(dek, aad = null)
 
-        // Unwrap with fallback should succeed even if AAD was not supplied
         val unwrapped = cryptoManager.unwrapDataKeyWithFallback(wrappedLegacy, aad = null)
         assertArrayEquals(dek.encoded, unwrapped.encoded)
     }
 
     @Test
     fun testPartialStreamReadingWithIntermittentZeroReads() {
-        val totalSize = 140 * 1024 // > 2 chunks
+        val totalSize = 140 * 1024
         val payload = ByteArray(totalSize) { (it % 251).toByte() }
 
-        // Stream that returns 0 bytes alternately with small chunks (e.g. 1024 bytes)
         val intermittentStream = object : java.io.InputStream() {
             private var index = 0
             private var shouldReturnZero = false
@@ -519,7 +503,7 @@ class VaultCryptoTest {
                 if (index >= totalSize) return -1
                 if (shouldReturnZero) {
                     shouldReturnZero = false
-                    return 0 // Intermittent 0-byte non-blocking read simulation
+                    return 0
                 }
                 shouldReturnZero = true
                 val toRead = minOf(len, 1024, totalSize - index)
@@ -539,7 +523,6 @@ class VaultCryptoTest {
 
         assertEquals(totalSize.toLong(), result.plaintextSizeBytes)
 
-        // Verify seeking and reading arbitrary slice
         val out = ByteArray(5000)
         val count = cryptoManager.readDecryptedRange(
             encryptedFile = destFile,
@@ -571,9 +554,6 @@ class VaultCryptoTest {
             chunkSize = 64 * 1024
         )
 
-        // Alter chunkSize in header:
-        // Header structure: Magic(8) + Salt(8) + DekLen(4) + WrappedDek(60) + ChunkSize(4)
-        // Offset of chunkSize = 8 + 8 + 4 + 60 = 80
         val raf = RandomAccessFile(destFile, "rw")
         raf.seek(80L)
         val originalChunkSize = raf.readInt()
@@ -602,8 +582,7 @@ class VaultCryptoTest {
 
     @Test
     fun testChunkTamperingOrderSwappingThrowsAEADBadTagException() {
-        // Multi-chunk file: 2 full chunks
-        val chunkSize = 1024 // 1KB chunks for fast swapping test
+        val chunkSize = 1024
         val totalSize = 2048
         val payload = ByteArray(totalSize) { (it % 100).toByte() }
         val destFile = tempFolder.newFile("swapped_chunks.enc")
@@ -615,7 +594,6 @@ class VaultCryptoTest {
             chunkSize = chunkSize
         )
 
-        // Read chunk 0 and chunk 1 from file
         val raf = RandomAccessFile(destFile, "rw")
         raf.seek(result.headerSize.toLong())
         val size0 = raf.readInt()
@@ -626,7 +604,6 @@ class VaultCryptoTest {
         val enc1 = ByteArray(size1)
         raf.readFully(enc1)
 
-        // Swap: write chunk 1 at chunk 0's place, and chunk 0 at chunk 1's place
         raf.seek(result.headerSize.toLong())
         raf.writeInt(size1)
         raf.write(enc1)
@@ -636,7 +613,6 @@ class VaultCryptoTest {
 
         val outBuffer = ByteArray(chunkSize)
 
-        // Attempting to read chunk 0 (which now contains chunk 1's data with chunk 0's expected nonce and AAD)
         assertThrows(AEADBadTagException::class.java) {
             cryptoManager.readDecryptedRange(
                 encryptedFile = destFile,
@@ -656,7 +632,7 @@ class VaultCryptoTest {
     @Test
     fun testRandomAccessSeekingForwardAndBackward() {
         val chunkSize = 64 * 1024
-        val totalSize = 180 * 1024 // 2 full chunks (64KB each) + 52KB partial final chunk
+        val totalSize = 180 * 1024
         val payload = ByteArray(totalSize) { (it % 251).toByte() }
         val destFile = tempFolder.newFile("test_bidirectional_seek.enc")
 
@@ -669,7 +645,6 @@ class VaultCryptoTest {
 
         val buffer = ByteArray(1000)
 
-        // Seek forward to chunk 2 (final partial chunk at offset 150,000)
         val read1 = cryptoManager.readDecryptedRange(
             encryptedFile = destFile,
             fileSalt = result.fileSalt,
@@ -685,7 +660,6 @@ class VaultCryptoTest {
         assertEquals(1000, read1)
         assertArrayEquals(Arrays.copyOfRange(payload, 150_000, 151_000), buffer)
 
-        // Seek backward to chunk 0 (offset 500)
         val read2 = cryptoManager.readDecryptedRange(
             encryptedFile = destFile,
             fileSalt = result.fileSalt,
@@ -701,7 +675,6 @@ class VaultCryptoTest {
         assertEquals(1000, read2)
         assertArrayEquals(Arrays.copyOfRange(payload, 500, 1500), buffer)
 
-        // Seek forward to chunk 1 (offset 70,000)
         val read3 = cryptoManager.readDecryptedRange(
             encryptedFile = destFile,
             fileSalt = result.fileSalt,
@@ -720,7 +693,7 @@ class VaultCryptoTest {
 
     @Test
     fun testFileSmallerThanSingleChunk() {
-        val totalSize = 15 * 1024 // 15 KB < 64 KB chunk size
+        val totalSize = 15 * 1024
         val payload = ByteArray(totalSize) { (it % 127).toByte() }
         val destFile = tempFolder.newFile("test_small_file.enc")
 
@@ -756,7 +729,6 @@ class VaultCryptoTest {
         val destFile = tempFolder.newFile("stalled_stream.enc")
         val tempFile = File(destFile.parentFile, "${destFile.name}.tmp")
 
-        // Stream that delivers 10KB then stalls completely, returning 0 repeatedly
         val stalledStream = object : java.io.InputStream() {
             private var bytesDelivered = 0
             override fun read(): Int {
@@ -764,7 +736,7 @@ class VaultCryptoTest {
                     bytesDelivered++
                     0x55
                 } else {
-                    0 // Persistent zero read
+                    0
                 }
             }
 
@@ -775,7 +747,7 @@ class VaultCryptoTest {
                     bytesDelivered += toDeliver
                     return toDeliver
                 }
-                return 0 // Persistent 0-byte read simulation
+                return 0
             }
         }
 
@@ -789,7 +761,6 @@ class VaultCryptoTest {
         }
 
         assertTrue(exception.message?.contains("Stream stalled") == true)
-        // Ensure no corrupt or incomplete temporary file remains on disk
         assertFalse("Incomplete temp file must be deleted upon IOException", tempFile.exists())
         assertFalse("Destination file must not be created on stream stall", destFile.exists())
     }
@@ -817,7 +788,6 @@ class VaultCryptoTest {
             )
         }
 
-        // Temp file must be purged cleanly upon cancellation
         assertFalse(tempFile.exists())
     }
 }
