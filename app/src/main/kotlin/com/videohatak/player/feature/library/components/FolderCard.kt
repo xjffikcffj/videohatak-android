@@ -54,7 +54,7 @@ fun FolderCard(
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = folder.name,
+                    text = folder.displayName,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )

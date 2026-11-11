@@ -12,6 +12,7 @@ import com.videohatak.player.core.playback.PlaybackPositionManager
 import com.videohatak.player.core.playback.PlaybackPreferencesRepository
 import com.videohatak.player.core.playback.PlayerUiState
 import com.videohatak.player.core.playback.VideoPlayerManager
+import com.videohatak.player.core.playlist.model.toVideoItem
 import com.videohatak.player.core.playlist.repository.PlaylistRepositoryImpl
 import com.videohatak.player.core.subtitle.model.SubtitleTrack
 import com.videohatak.player.core.subtitle.parser.SubtitleParser

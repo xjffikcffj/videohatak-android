@@ -5,9 +5,6 @@ import android.util.LruCache
 
 class ThumbnailCache(val maxCacheSizeKb: Int = ThumbnailCache.calculateSafeMemoryLimitKb()) {
 
-    // Secondary constructor supporting item count if maxSize is passed
-    constructor(maxSize: Int) : this(maxCacheSizeKb = (maxSize * 64).coerceAtLeast(1024))
-
     companion object {
         fun calculateSafeMemoryLimitKb(): Int {
             val maxMemoryKb = (Runtime.getRuntime().maxMemory() / 1024L).toInt()
