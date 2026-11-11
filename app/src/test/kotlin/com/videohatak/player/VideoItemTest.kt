@@ -1,3 +1,4 @@
+
 package com.videohatak.player
 
 import android.net.Uri
@@ -5,17 +6,17 @@ import com.videohatak.player.core.model.VideoItem
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.junit.runners.JUnit4
+import org.robolectric.RobolectricTestRunner
 
-@RunWith(JUnit4::class)
+@RunWith(RobolectricTestRunner::class)
 class VideoItemTest {
 
     private fun createSampleVideo(
         id: Long = 1L,
         title: String = "Test Video",
         displayName: String = "test.mp4",
-        durationMs: Long = 125000L, // 2m 5s
-        sizeBytes: Long = 10485760L, // 10 MB
+        durationMs: Long = 125000L,
+        sizeBytes: Long = 10485760L,
         width: Int = 1920,
         height: Int = 1080
     ): VideoItem {
@@ -39,15 +40,12 @@ class VideoItemTest {
 
     @Test
     fun testDurationFormatting() {
-        // Zero duration
         val zero = createSampleVideo(durationMs = 0L)
         assertEquals("00:00", zero.formattedDuration)
 
-        // Under 1 hour: 2 minutes 5 seconds
         val shortVid = createSampleVideo(durationMs = 125000L)
         assertEquals("02:05", shortVid.formattedDuration)
 
-        // Over 1 hour: 1 hour, 15 minutes, 30 seconds
         val longDurationMs = (1 * 3600 + 15 * 60 + 30) * 1000L
         val longVid = createSampleVideo(durationMs = longDurationMs)
         assertEquals("01:15:30", longVid.formattedDuration)
@@ -61,7 +59,9 @@ class VideoItemTest {
         val mbSize = createSampleVideo(sizeBytes = 15 * 1024 * 1024L)
         assertEquals("15.0 ميجابايت", mbSize.formattedSize)
 
-        val gbSize = createSampleVideo(sizeBytes = (2.5 * 1024 * 1024 * 1024L).toLong())
+        val gbSize = createSampleVideo(
+            sizeBytes = (2.5 * 1024 * 1024 * 1024L).toLong()
+        )
         assertEquals("2.5 جيجابايت", gbSize.formattedSize)
     }
 
@@ -82,13 +82,22 @@ class VideoItemTest {
 
     @Test
     fun testSafeTitleFallback() {
-        val withTitle = createSampleVideo(title = "My Lecture", displayName = "lecture.mp4")
+        val withTitle = createSampleVideo(
+            title = "My Lecture",
+            displayName = "lecture.mp4"
+        )
         assertEquals("My Lecture", withTitle.safeTitle)
 
-        val withoutTitle = createSampleVideo(title = "", displayName = "vacation.mp4")
+        val withoutTitle = createSampleVideo(
+            title = "",
+            displayName = "vacation.mp4"
+        )
         assertEquals("vacation.mp4", withoutTitle.safeTitle)
 
-        val blankBoth = createSampleVideo(title = "   ", displayName = "")
+        val blankBoth = createSampleVideo(
+            title = "   ",
+            displayName = ""
+        )
         assertEquals("فيديو محلي", blankBoth.safeTitle)
     }
 }
