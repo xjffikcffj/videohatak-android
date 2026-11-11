@@ -1,13 +1,9 @@
+
 package com.videohatak.player
 
 import android.net.Uri
-import com.videohatak.player.core.data.repository.LocalVideoRepositoryImpl
-import com.videohatak.player.core.model.SortDirection
 import com.videohatak.player.core.model.VideoItem
-import com.videohatak.player.core.model.VideoSortField
-import com.videohatak.player.core.model.VideoSortOrder
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.JUnit4
@@ -48,14 +44,8 @@ class VideoSortAndFilterTest {
         makeVideo(id = 3, title = "Gamma", durationMs = 15000L, sizeBytes = 2000L, dateAddedSec = 200L, bucketId = "bucket_2", bucketName = "Downloads")
     )
 
-    // A lightweight subclass to test filter and group logic without ContentResolver
-    private class DummyVideoRepository : LocalVideoRepositoryImpl(
-        context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
-    )
-
     @Test
     fun testSortingByNameAscending() {
-        // Simple comparator verification matching repository logic
         val sorted = sampleVideos.sortedBy { it.safeTitle.lowercase() }
         assertEquals("Alpha", sorted[0].safeTitle)
         assertEquals("Beta", sorted[1].safeTitle)
@@ -73,9 +63,9 @@ class VideoSortAndFilterTest {
     @Test
     fun testSortingByDateAddedDescending() {
         val sorted = sampleVideos.sortedByDescending { it.dateAddedSec }
-        assertEquals(2L, sorted[0].id) // Beta (300)
-        assertEquals(3L, sorted[1].id) // Gamma (200)
-        assertEquals(1L, sorted[2].id) // Alpha (100)
+        assertEquals(2L, sorted[0].id)
+        assertEquals(3L, sorted[1].id)
+        assertEquals(1L, sorted[2].id)
     }
 
     @Test
