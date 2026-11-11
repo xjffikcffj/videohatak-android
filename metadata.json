@@ -1,0 +1,6 @@
+{
+  "name": "فيديوهاتك — كما تحب (VideoHatak)",
+  "description": "تطبيق مشغل وسائط محلي لنظام Android يدعم الأمان المتقدم، والخزنة المشفرة، والترجمات، والتشغيل عالي الكفاءة",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

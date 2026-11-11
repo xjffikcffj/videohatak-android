@@ -1,0 +1,10 @@
+<resources>
+    <style name="Theme.VideoHatak" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">@color/charcoal_950</item>
+        <item name="android:navigationBarColor">@color/charcoal_950</item>
+    </style>
+
+    <style name="Theme.VideoHatak.Starting" parent="Theme.VideoHatak">
+        <item name="android:windowBackground">@color/charcoal_950</item>
+    </style>
+</resources>
