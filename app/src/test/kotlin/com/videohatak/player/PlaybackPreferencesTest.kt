@@ -1,4 +1,3 @@
-
 package com.videohatak.player
 
 import androidx.datastore.core.DataStore
@@ -172,6 +171,10 @@ class PlaybackPreferencesTest {
 
         val restored = realRepo.getSavedVideoPosition(uri, durationMs = 120_000L)
         assertEquals(42_000L, restored)
+
+        // Close the first DataStore scope before reopening the same file.
+        // DataStore does not allow two active instances for one file.
+        scope.cancel()
 
         val freshScope = createTestScope()
         val freshDataStore = PreferenceDataStoreFactory.create(scope = freshScope, produceFile = { file })
@@ -520,6 +523,9 @@ class PlaybackPreferencesTest {
         val migratedPos = realRepo.getSavedVideoPosition(mediaStoreUri, durationMs = 120_000L, legacyVideoId = 888L)
         assertEquals("Must successfully read and migrate legacy position", 65_000L, migratedPos)
 
+        // Release the first DataStore before creating another instance for this file.
+        scope.cancel()
+
         val scope2 = createTestScope()
         val dataStore2 = PreferenceDataStoreFactory.create(scope = scope2, produceFile = { file })
         val realRepo2 = PlaybackPreferencesRepositoryImpl(dataStore2)
@@ -684,7 +690,7 @@ class PlaybackPreferencesTest {
 
         val currentWriter = manager.getWriterJobForTesting()
         assertNotNull(currentWriter)
-        currentWriter?.cancel(CancellationException("Simulated worker cancellation during delay"))
+        currentWriter?.cancel(CancellationException("Simulated worker cancellation during retry delay"))
 
         assertTrue("flushPending must succeed after worker restart", manager.flushPending(timeoutMs = 4000L))
 
