@@ -18,8 +18,9 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
@@ -93,26 +94,38 @@ class PlaybackPreferencesTest {
 
     @After
     fun tearDown() = runBlocking {
+        // Shut down all managers before cancelling their scopes.
         for (mgr in activeManagers) {
             try {
                 mgr.shutdown(drainTimeoutMs = 500L)
-            } catch (_: Exception) {}
+            } catch (_: Exception) {
+                // Continue cleanup even if one manager fails to shut down.
+            }
         }
         activeManagers.clear()
 
+        // Cancel and WAIT for every scope and its child jobs to finish.
         for (sc in activeScopes) {
             try {
-                sc.cancel()
-            } catch (_: Exception) {}
+                sc.coroutineContext[Job]?.cancelAndJoin()
+            } catch (_: Exception) {
+                // Continue cleanup.
+            }
         }
         activeScopes.clear()
 
+        // Delete temporary files only after DataStore scopes have terminated.
         for (file in tempFiles) {
             try {
-                if (file.exists()) file.delete()
-            } catch (_: Exception) {}
+                if (file.exists()) {
+                    file.delete()
+                }
+            } catch (_: Exception) {
+                // Ignore cleanup failures.
+            }
         }
         tempFiles.clear()
+
         PlaybackPositionManager.resetInstanceForTesting()
     }
 
@@ -123,21 +136,36 @@ class PlaybackPreferencesTest {
     class FaultInjectingRepository(
         val delegate: PlaybackPreferencesRepository
     ) : PlaybackPreferencesRepository {
+
         var failCount = 0
         var failWithException: Exception = IOException("Simulated disk I/O error")
         var onBeforeSave: (suspend (String, Long, Long) -> Unit)? = null
         var onAfterFailure: ((String, Long, Exception) -> Unit)? = null
         val saveCalls = mutableListOf<Triple<String, Long, Long>>()
 
-        override val playbackSpeed: Flow<Float> get() = delegate.playbackSpeed
-        override val resizeMode: Flow<Int> get() = delegate.resizeMode
-        override val repeatMode: Flow<String> get() = delegate.repeatMode
+        override val playbackSpeed: Flow<Float>
+            get() = delegate.playbackSpeed
 
-        override suspend fun setPlaybackSpeed(speed: Float) = delegate.setPlaybackSpeed(speed)
-        override suspend fun setResizeMode(mode: Int) = delegate.setResizeMode(mode)
-        override suspend fun setRepeatMode(mode: String) = delegate.setRepeatMode(mode)
+        override val resizeMode: Flow<Int>
+            get() = delegate.resizeMode
 
-        override suspend fun saveVideoPosition(videoUri: String, positionMs: Long, durationMs: Long) {
+        override val repeatMode: Flow<String>
+            get() = delegate.repeatMode
+
+        override suspend fun setPlaybackSpeed(speed: Float) =
+            delegate.setPlaybackSpeed(speed)
+
+        override suspend fun setResizeMode(mode: Int) =
+            delegate.setResizeMode(mode)
+
+        override suspend fun setRepeatMode(mode: String) =
+            delegate.setRepeatMode(mode)
+
+        override suspend fun saveVideoPosition(
+            videoUri: String,
+            positionMs: Long,
+            durationMs: Long
+        ) {
             saveCalls.add(Triple(videoUri, positionMs, durationMs))
             onBeforeSave?.invoke(videoUri, positionMs, durationMs)
 
@@ -147,11 +175,20 @@ class PlaybackPreferencesTest {
                 onAfterFailure?.invoke(videoUri, positionMs, ex)
                 throw ex
             }
+
             delegate.saveVideoPosition(videoUri, positionMs, durationMs)
         }
 
-        override suspend fun getSavedVideoPosition(videoUri: String, durationMs: Long, legacyVideoId: Long?): Long {
-            return delegate.getSavedVideoPosition(videoUri, durationMs, legacyVideoId)
+        override suspend fun getSavedVideoPosition(
+            videoUri: String,
+            durationMs: Long,
+            legacyVideoId: Long?
+        ): Long {
+            return delegate.getSavedVideoPosition(
+                videoUri,
+                durationMs,
+                legacyVideoId
+            )
         }
     }
 
@@ -166,22 +203,58 @@ class PlaybackPreferencesTest {
         val manager = createManager(realRepo, scope)
 
         val uri = "content://media/external/video/media/101"
-        val req = manager.enqueueSave(uri, positionMs = 42_000L, durationMs = 120_000L)
-        assertNotNull(req)
-        assertTrue(manager.flushPending(timeoutMs = 3000L))
 
-        val restored = realRepo.getSavedVideoPosition(uri, durationMs = 120_000L)
+        val req = manager.enqueueSave(
+            uri,
+            positionMs = 42_000L,
+            durationMs = 120_000L
+        )
+
+        assertNotNull(req)
+
+        assertTrue(
+            "Position must be flushed successfully before reopening DataStore",
+            manager.flushPending(timeoutMs = 3000L)
+        )
+
+        val restored = realRepo.getSavedVideoPosition(
+            uri,
+            durationMs = 120_000L
+        )
+
         assertEquals(42_000L, restored)
 
-        // Close the first DataStore scope before reopening the same file.
-        // DataStore does not allow two active instances for one file.
-        scope.cancel()
+        // Stop the manager before closing its application scope.
+        manager.shutdown(drainTimeoutMs = 3000L)
 
+        // Wait for DataStore and all child jobs to terminate.
+        scope.coroutineContext[Job]?.cancelAndJoin()
+
+        // Reopen the exact same file with a completely fresh scope.
         val freshScope = createTestScope()
-        val freshDataStore = PreferenceDataStoreFactory.create(scope = freshScope, produceFile = { file })
-        val freshRepo = PlaybackPreferencesRepositoryImpl(freshDataStore)
-        val restoredFromDisk = freshRepo.getSavedVideoPosition(uri, durationMs = 120_000L)
-        assertEquals("Position must persist on real disk file", 42_000L, restoredFromDisk)
+
+        try {
+            val freshDataStore = PreferenceDataStoreFactory.create(
+                scope = freshScope,
+                produceFile = { file }
+            )
+
+            val freshRepo = PlaybackPreferencesRepositoryImpl(freshDataStore)
+
+            val restoredFromDisk = freshRepo.getSavedVideoPosition(
+                uri,
+                durationMs = 120_000L
+            )
+
+            assertEquals(
+                "Position must persist on disk after closing and reopening DataStore",
+                42_000L,
+                restoredFromDisk
+            )
+        } finally {
+            // Release the second DataStore before the test finishes.
+            freshScope.coroutineContext[Job]?.cancelAndJoin()
+        }
     }
 
     // -------------------------------------------------------------
@@ -197,13 +270,34 @@ class PlaybackPreferencesTest {
 
         val manager = createManager(faultRepo, scope)
         val uri = "content://media/external/video/media/202"
-        manager.enqueueSave(uri, positionMs = 25_000L, durationMs = 60_000L)
+
+        manager.enqueueSave(
+            uri,
+            positionMs = 25_000L,
+            durationMs = 60_000L
+        )
 
         val flushSuccess = manager.flushPending(timeoutMs = 4000L)
-        assertTrue("Flush must report true after successful retry", flushSuccess)
-        assertEquals(25_000L, faultRepo.getSavedVideoPosition(uri, 60_000L))
-        assertTrue("Must have attempted at least twice (fail then succeed)", faultRepo.saveCalls.size >= 2)
-        assertTrue("Failed requests map must be clean after recovery", manager.getFailedRequests().isEmpty())
+
+        assertTrue(
+            "Flush must report true after successful retry",
+            flushSuccess
+        )
+
+        assertEquals(
+            25_000L,
+            faultRepo.getSavedVideoPosition(uri, 60_000L)
+        )
+
+        assertTrue(
+            "Must have attempted at least twice (fail then succeed)",
+            faultRepo.saveCalls.size >= 2
+        )
+
+        assertTrue(
+            "Failed requests map must be clean after recovery",
+            manager.getFailedRequests().isEmpty()
+        )
     }
 
     // -------------------------------------------------------------
@@ -219,16 +313,35 @@ class PlaybackPreferencesTest {
 
         val manager = createManager(faultRepo, scope)
         val uri = "content://media/external/video/media/303"
-        manager.enqueueSave(uri, positionMs = 30_000L, durationMs = 90_000L)
+
+        manager.enqueueSave(
+            uri,
+            positionMs = 30_000L,
+            durationMs = 90_000L
+        )
 
         val flushResult = manager.flushPending(timeoutMs = 3000L)
-        assertFalse("flushPending must return false when targeted request fails permanently", flushResult)
+
+        assertFalse(
+            "flushPending must return false when targeted request fails permanently",
+            flushResult
+        )
 
         val failed = manager.getFailedRequests()
-        assertTrue("Failed request must be in failedRequestsMap", failed.containsKey(uri))
+
+        assertTrue(
+            "Failed request must be in failedRequestsMap",
+            failed.containsKey(uri)
+        )
+
         assertEquals(30_000L, failed[uri]?.positionMs)
         assertEquals(0, manager.getPendingCount())
-        assertEquals("DataStore must have 0L since writes failed", 0L, faultRepo.getSavedVideoPosition(uri, 90_000L))
+
+        assertEquals(
+            "DataStore must have 0L since writes failed",
+            0L,
+            faultRepo.getSavedVideoPosition(uri, 90_000L)
+        )
     }
 
     // -------------------------------------------------------------
@@ -244,11 +357,25 @@ class PlaybackPreferencesTest {
         manager.saveChannel.close()
 
         val uri = "content://media/external/video/media/404"
-        val result = manager.enqueueSave(uri, positionMs = 15_000L, durationMs = 60_000L)
 
-        assertNull("Closed channel must reject enqueueSave and return null", result)
+        val result = manager.enqueueSave(
+            uri,
+            positionMs = 15_000L,
+            durationMs = 60_000L
+        )
+
+        assertNull(
+            "Closed channel must reject enqueueSave and return null",
+            result
+        )
+
         val failed = manager.getFailedRequests()
-        assertTrue("Rejected request must be tracked in failedRequestsMap", failed.containsKey(uri))
+
+        assertTrue(
+            "Rejected request must be tracked in failedRequestsMap",
+            failed.containsKey(uri)
+        )
+
         assertEquals(15_000L, failed[uri]?.positionMs)
     }
 
@@ -275,13 +402,23 @@ class PlaybackPreferencesTest {
 
         val manager = createManager(faultRepo, scope)
 
-        val req1 = manager.enqueueSave(uri, positionMs = 10_000L, durationMs = 120_000L)
+        val req1 = manager.enqueueSave(
+            uri,
+            positionMs = 10_000L,
+            durationMs = 120_000L
+        )
+
         assertNotNull(req1)
 
         olderWriteEntered.await()
         assertEquals(req1, manager.inFlightRequest)
 
-        val req2 = manager.enqueueSave(uri, positionMs = 55_000L, durationMs = 120_000L)
+        val req2 = manager.enqueueSave(
+            uri,
+            positionMs = 55_000L,
+            durationMs = 120_000L
+        )
+
         assertNotNull(req2)
         assertTrue(req2!!.sequenceNumber > req1!!.sequenceNumber)
 
@@ -289,7 +426,11 @@ class PlaybackPreferencesTest {
 
         assertTrue(manager.flushPending(timeoutMs = 4000L))
 
-        assertEquals("Newer position must win over older in-flight write", 55_000L, realRepo.getSavedVideoPosition(uri, 120_000L))
+        assertEquals(
+            "Newer position must win over older in-flight write",
+            55_000L,
+            realRepo.getSavedVideoPosition(uri, 120_000L)
+        )
     }
 
     // -------------------------------------------------------------
@@ -303,14 +444,34 @@ class PlaybackPreferencesTest {
         val manager = createManager(realRepo, scope)
         val uri = "content://media/external/video/media/606"
 
-        val newerReq = PositionSaveRequest(uri, positionMs = 70_000L, durationMs = 100_000L, sequenceNumber = 200L)
-        manager.processSingleRequest(newerReq)
-        assertEquals(70_000L, realRepo.getSavedVideoPosition(uri, 100_000L))
+        val newerReq = PositionSaveRequest(
+            uri,
+            positionMs = 70_000L,
+            durationMs = 100_000L,
+            sequenceNumber = 200L
+        )
 
-        val olderReq = PositionSaveRequest(uri, positionMs = 20_000L, durationMs = 100_000L, sequenceNumber = 100L)
+        manager.processSingleRequest(newerReq)
+
+        assertEquals(
+            70_000L,
+            realRepo.getSavedVideoPosition(uri, 100_000L)
+        )
+
+        val olderReq = PositionSaveRequest(
+            uri,
+            positionMs = 20_000L,
+            durationMs = 100_000L,
+            sequenceNumber = 100L
+        )
+
         manager.processSingleRequest(olderReq)
 
-        assertEquals("Older sequence must not overwrite newer saved position", 70_000L, realRepo.getSavedVideoPosition(uri, 100_000L))
+        assertEquals(
+            "Older sequence must not overwrite newer saved position",
+            70_000L,
+            realRepo.getSavedVideoPosition(uri, 100_000L)
+        )
     }
 
     // -------------------------------------------------------------
@@ -326,13 +487,23 @@ class PlaybackPreferencesTest {
 
         val manager = createManager(faultRepo, scope)
         val uri = "content://media/external/video/media/707"
-        val req = PositionSaveRequest(uri, positionMs = 20_000L, durationMs = 60_000L, sequenceNumber = 1L)
+
+        val req = PositionSaveRequest(
+            uri,
+            positionMs = 20_000L,
+            durationMs = 60_000L,
+            sequenceNumber = 1L
+        )
 
         try {
             manager.processSingleRequest(req)
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+        }
 
-        assertNull("inFlightRequest must be null in finally", manager.inFlightRequest)
+        assertNull(
+            "inFlightRequest must be null in finally",
+            manager.inFlightRequest
+        )
     }
 
     // -------------------------------------------------------------
@@ -348,14 +519,27 @@ class PlaybackPreferencesTest {
 
         val manager = createManager(faultRepo, scope)
         val uri = "content://media/external/video/media/808"
-        manager.enqueueSave(uri, positionMs = 40_000L, durationMs = 90_000L)
+
+        manager.enqueueSave(
+            uri,
+            positionMs = 40_000L,
+            durationMs = 90_000L
+        )
 
         val startTime = System.currentTimeMillis()
         val success = manager.flushPending(timeoutMs = 4000L)
         val elapsed = System.currentTimeMillis() - startTime
 
-        assertFalse("flushPending must return false on permanent failure", success)
-        assertTrue("flushPending must not hang for full timeout (elapsed: $elapsed ms)", elapsed < 3500L)
+        assertFalse(
+            "flushPending must return false on permanent failure",
+            success
+        )
+
+        assertTrue(
+            "flushPending must not hang for full timeout (elapsed: $elapsed ms)",
+            elapsed < 3500L
+        )
+
         assertEquals(0, manager.getPendingCount())
     }
 
@@ -372,18 +556,30 @@ class PlaybackPreferencesTest {
 
         val manager = createManager(faultRepo, scope)
         val uri = "content://media/external/video/media/909"
-        manager.enqueueSave(uri, positionMs = 35_000L, durationMs = 80_000L)
+
+        manager.enqueueSave(
+            uri,
+            positionMs = 35_000L,
+            durationMs = 80_000L
+        )
+
         manager.flushPending(timeoutMs = 2000L)
 
         assertEquals(1, manager.getFailedRequests().size)
 
         faultRepo.failCount = 0
+
         val count = manager.retryFailedRequests()
+
         assertEquals(1, count)
 
         assertTrue(manager.flushPending(timeoutMs = 2000L))
         assertTrue(manager.getFailedRequests().isEmpty())
-        assertEquals(35_000L, realRepo.getSavedVideoPosition(uri, 80_000L))
+
+        assertEquals(
+            35_000L,
+            realRepo.getSavedVideoPosition(uri, 80_000L)
+        )
     }
 
     // -------------------------------------------------------------
@@ -399,15 +595,38 @@ class PlaybackPreferencesTest {
         val video1Uri = "content://media/external/video/media/discontinuity_1"
         val video2Uri = "content://media/external/video/media/discontinuity_2"
 
-        manager.enqueueSave(video1Uri, positionMs = 45_000L, durationMs = 60_000L)
-        assertTrue(manager.flushPending())
-        assertEquals(45_000L, realRepo.getSavedVideoPosition(video1Uri, 60_000L))
+        manager.enqueueSave(
+            video1Uri,
+            positionMs = 45_000L,
+            durationMs = 60_000L
+        )
 
-        manager.enqueueSave(video2Uri, positionMs = 0L, durationMs = 120_000L)
         assertTrue(manager.flushPending())
 
-        assertEquals("Video 1 position must remain at 45,000ms after transition to Video 2", 45_000L, realRepo.getSavedVideoPosition(video1Uri, 60_000L))
-        assertEquals("Video 2 position must be 0L", 0L, realRepo.getSavedVideoPosition(video2Uri, 120_000L))
+        assertEquals(
+            45_000L,
+            realRepo.getSavedVideoPosition(video1Uri, 60_000L)
+        )
+
+        manager.enqueueSave(
+            video2Uri,
+            positionMs = 0L,
+            durationMs = 120_000L
+        )
+
+        assertTrue(manager.flushPending())
+
+        assertEquals(
+            "Video 1 position must remain at 45,000ms after transition to Video 2",
+            45_000L,
+            realRepo.getSavedVideoPosition(video1Uri, 60_000L)
+        )
+
+        assertEquals(
+            "Video 2 position must be 0L",
+            0L,
+            realRepo.getSavedVideoPosition(video2Uri, 120_000L)
+        )
     }
 
     // -------------------------------------------------------------
@@ -423,18 +642,34 @@ class PlaybackPreferencesTest {
         val durationMs = 60_000L
 
         val midPos = 30_000L
+
         realRepo.saveVideoPosition(uri, midPos, durationMs)
+
         val restoredMid = realRepo.getSavedVideoPosition(uri, durationMs)
+
         assertEquals(30_000L, restoredMid)
 
         val nearEndPos = 59_000L
+
         realRepo.saveVideoPosition(uri, nearEndPos, durationMs)
+
         val restoredNearEnd = realRepo.getSavedVideoPosition(uri, durationMs)
-        assertEquals("Near-end position must reset to 0L according to thresholds", 0L, restoredNearEnd)
+
+        assertEquals(
+            "Near-end position must reset to 0L according to thresholds",
+            0L,
+            restoredNearEnd
+        )
 
         realRepo.saveVideoPosition(uri, 500L, durationMs)
+
         val restoredIntro = realRepo.getSavedVideoPosition(uri, durationMs)
-        assertEquals("Intro offset under threshold must reset to 0L", 0L, restoredIntro)
+
+        assertEquals(
+            "Intro offset under threshold must reset to 0L",
+            0L,
+            restoredIntro
+        )
     }
 
     // -------------------------------------------------------------
@@ -456,7 +691,12 @@ class PlaybackPreferencesTest {
         val newPos = realRepo.getSavedVideoPosition(uriNew, 60_000L)
 
         assertEquals(40_000L, oldPos)
-        assertEquals("New track must have 0L, never old track's position", 0L, newPos)
+
+        assertEquals(
+            "New track must have 0L, never old track's position",
+            0L,
+            newPos
+        )
     }
 
     // -------------------------------------------------------------
@@ -473,18 +713,43 @@ class PlaybackPreferencesTest {
         val historicalUri = "content://media/external/video/media/historical_fail"
 
         faultRepo.failCount = 10
-        manager.enqueueSave(historicalUri, positionMs = 12_000L, durationMs = 60_000L)
+
+        manager.enqueueSave(
+            historicalUri,
+            positionMs = 12_000L,
+            durationMs = 60_000L
+        )
+
         val firstFlush = manager.flushPending(timeoutMs = 2000L)
-        assertFalse("First flush must fail because historicalUri failed permanently", firstFlush)
+
+        assertFalse(
+            "First flush must fail because historicalUri failed permanently",
+            firstFlush
+        )
+
         assertTrue(manager.getFailedRequests().containsKey(historicalUri))
 
         faultRepo.failCount = 0
+
         val newUri = "content://media/external/video/media/new_success"
-        manager.enqueueSave(newUri, positionMs = 45_000L, durationMs = 90_000L)
+
+        manager.enqueueSave(
+            newUri,
+            positionMs = 45_000L,
+            durationMs = 90_000L
+        )
 
         val secondFlush = manager.flushPending(timeoutMs = 3000L)
-        assertTrue("Subsequent flush must succeed even with historical failure in failedRequestsMap", secondFlush)
-        assertEquals(45_000L, realRepo.getSavedVideoPosition(newUri, 90_000L))
+
+        assertTrue(
+            "Subsequent flush must succeed even with historical failure in failedRequestsMap",
+            secondFlush
+        )
+
+        assertEquals(
+            45_000L,
+            realRepo.getSavedVideoPosition(newUri, 90_000L)
+        )
     }
 
     // -------------------------------------------------------------
@@ -492,17 +757,44 @@ class PlaybackPreferencesTest {
     // -------------------------------------------------------------
     @Test
     fun test14_ShortVideoThresholds() {
-        assertEquals(0L, PlaybackPositionThresholds.calculateEffectivePosition(50L, 1000L))
-        assertEquals(500L, PlaybackPositionThresholds.calculateEffectivePosition(500L, 1000L))
-        assertEquals(0L, PlaybackPositionThresholds.calculateEffectivePosition(900L, 1000L))
+        assertEquals(
+            0L,
+            PlaybackPositionThresholds.calculateEffectivePosition(50L, 1000L)
+        )
+        assertEquals(
+            500L,
+            PlaybackPositionThresholds.calculateEffectivePosition(500L, 1000L)
+        )
+        assertEquals(
+            0L,
+            PlaybackPositionThresholds.calculateEffectivePosition(900L, 1000L)
+        )
 
-        assertEquals(0L, PlaybackPositionThresholds.calculateEffectivePosition(150L, 3000L))
-        assertEquals(1500L, PlaybackPositionThresholds.calculateEffectivePosition(1500L, 3000L))
-        assertEquals(0L, PlaybackPositionThresholds.calculateEffectivePosition(2800L, 3000L))
+        assertEquals(
+            0L,
+            PlaybackPositionThresholds.calculateEffectivePosition(150L, 3000L)
+        )
+        assertEquals(
+            1500L,
+            PlaybackPositionThresholds.calculateEffectivePosition(1500L, 3000L)
+        )
+        assertEquals(
+            0L,
+            PlaybackPositionThresholds.calculateEffectivePosition(2800L, 3000L)
+        )
 
-        assertEquals(0L, PlaybackPositionThresholds.calculateEffectivePosition(200L, 5000L))
-        assertEquals(2500L, PlaybackPositionThresholds.calculateEffectivePosition(2500L, 5000L))
-        assertEquals(0L, PlaybackPositionThresholds.calculateEffectivePosition(4800L, 5000L))
+        assertEquals(
+            0L,
+            PlaybackPositionThresholds.calculateEffectivePosition(200L, 5000L)
+        )
+        assertEquals(
+            2500L,
+            PlaybackPositionThresholds.calculateEffectivePosition(2500L, 5000L)
+        )
+        assertEquals(
+            0L,
+            PlaybackPositionThresholds.calculateEffectivePosition(4800L, 5000L)
+        )
     }
 
     // -------------------------------------------------------------
@@ -514,11 +806,13 @@ class PlaybackPreferencesTest {
         val (dataStore, _) = createRealDataStore(scope)
 
         val legacyKey = longPreferencesKey("playback_pos_888")
+
         dataStore.edit { prefs ->
             prefs[legacyKey] = 65_000L
         }
 
         val realRepo = PlaybackPreferencesRepositoryImpl(dataStore)
+
         val mediaStoreUri =
             "content://media/external/video/media/legacy_migration_888"
 
@@ -561,6 +855,7 @@ class PlaybackPreferencesTest {
         val uri = "content://media/external/video/media/1601"
 
         val firstAttemptFailed = CompletableDeferred<Unit>()
+
         faultRepo.onAfterFailure = { saveUri, _, _ ->
             if (saveUri == uri) {
                 firstAttemptFailed.complete(Unit)
@@ -569,18 +864,36 @@ class PlaybackPreferencesTest {
 
         faultRepo.failCount = 1
 
-        val req1 = manager.enqueueSave(uri, positionMs = 10_000L, durationMs = 60_000L)
+        val req1 = manager.enqueueSave(
+            uri,
+            positionMs = 10_000L,
+            durationMs = 60_000L
+        )
+
         assertNotNull(req1)
 
         firstAttemptFailed.await()
 
-        val req2 = manager.enqueueSave(uri, positionMs = 25_000L, durationMs = 60_000L)
+        val req2 = manager.enqueueSave(
+            uri,
+            positionMs = 25_000L,
+            durationMs = 60_000L
+        )
+
         assertNotNull(req2)
 
         assertTrue(manager.flushPending(timeoutMs = 3000L))
 
-        val finalPos = realRepo.getSavedVideoPosition(uri, durationMs = 60_000L)
-        assertEquals("Newer position must be saved on disk", 25_000L, finalPos)
+        val finalPos = realRepo.getSavedVideoPosition(
+            uri,
+            durationMs = 60_000L
+        )
+
+        assertEquals(
+            "Newer position must be saved on disk",
+            25_000L,
+            finalPos
+        )
     }
 
     // -------------------------------------------------------------
@@ -597,6 +910,7 @@ class PlaybackPreferencesTest {
         val uri = "content://media/external/video/media/fail_before_wait"
 
         val managerFailureHandled = CompletableDeferred<Unit>()
+
         manager.onRequestPermanentlyFailedForTesting = { failedReq ->
             if (failedReq.uri == uri) {
                 managerFailureHandled.complete(Unit)
@@ -604,7 +918,13 @@ class PlaybackPreferencesTest {
         }
 
         faultRepo.failCount = 10
-        val req = manager.enqueueSave(uri, positionMs = 35_000L, durationMs = 90_000L)
+
+        val req = manager.enqueueSave(
+            uri,
+            positionMs = 35_000L,
+            durationMs = 90_000L
+        )
+
         assertNotNull(req)
 
         managerFailureHandled.await()
@@ -613,11 +933,25 @@ class PlaybackPreferencesTest {
         assertNull(manager.inFlightRequest)
         assertTrue(manager.getFailedRequests().containsKey(uri))
 
-        val awaitSuccess = manager.awaitRequest(req!!, timeoutMs = 1500L)
-        assertFalse("awaitRequest must return false when request failed before wait", awaitSuccess)
+        val awaitSuccess = manager.awaitRequest(
+            req!!,
+            timeoutMs = 1500L
+        )
 
-        val flushSuccess = manager.flushPending(timeoutMs = 1500L, targetRequest = req)
-        assertFalse("flushPending(targetRequest) must return false when request failed before wait", flushSuccess)
+        assertFalse(
+            "awaitRequest must return false when request failed before wait",
+            awaitSuccess
+        )
+
+        val flushSuccess = manager.flushPending(
+            timeoutMs = 1500L,
+            targetRequest = req
+        )
+
+        assertFalse(
+            "flushPending(targetRequest) must return false when request failed before wait",
+            flushSuccess
+        )
     }
 
     // -------------------------------------------------------------
@@ -632,17 +966,42 @@ class PlaybackPreferencesTest {
 
         val uri = "content://media/external/video/media/unknown_dur_video"
 
-        val req = manager.enqueueSave(uri, positionMs = 58_000L, durationMs = 0L)
-        assertNotNull("enqueueSave must accept durationMs = 0L", req)
+        val req = manager.enqueueSave(
+            uri,
+            positionMs = 58_000L,
+            durationMs = 0L
+        )
+
+        assertNotNull(
+            "enqueueSave must accept durationMs = 0L",
+            req
+        )
 
         val success = manager.awaitRequest(req!!)
+
         assertTrue(success)
 
-        val rawPos = realRepo.getSavedVideoPosition(uri, durationMs = 0L)
-        assertEquals("Raw position must be preserved without premature end-clamping when duration is 0L", 58_000L, rawPos)
+        val rawPos = realRepo.getSavedVideoPosition(
+            uri,
+            durationMs = 0L
+        )
 
-        val effectiveWhenDurationKnown = realRepo.getSavedVideoPosition(uri, durationMs = 60_000L)
-        assertEquals("Position must reset to 0L once duration is resolved and position is within end window", 0L, effectiveWhenDurationKnown)
+        assertEquals(
+            "Raw position must be preserved without premature end-clamping when duration is 0L",
+            58_000L,
+            rawPos
+        )
+
+        val effectiveWhenDurationKnown = realRepo.getSavedVideoPosition(
+            uri,
+            durationMs = 60_000L
+        )
+
+        assertEquals(
+            "Position must reset to 0L once duration is resolved and position is within end window",
+            0L,
+            effectiveWhenDurationKnown
+        )
     }
 
     // -------------------------------------------------------------
@@ -656,23 +1015,49 @@ class PlaybackPreferencesTest {
         val faultRepo = FaultInjectingRepository(realRepo)
 
         val manager = createManager(faultRepo, scope)
+
         val failUri = "content://media/external/video/media/old_failed_video"
         val successUri = "content://media/external/video/media/new_successful_video"
 
         faultRepo.failCount = 10
-        val oldReq = manager.enqueueSave(failUri, positionMs = 15_000L, durationMs = 60_000L)
+
+        val oldReq = manager.enqueueSave(
+            failUri,
+            positionMs = 15_000L,
+            durationMs = 60_000L
+        )
+
         assertNotNull(oldReq)
-        val oldSuccess = manager.awaitRequest(oldReq!!, timeoutMs = 1500L)
+
+        val oldSuccess = manager.awaitRequest(
+            oldReq!!,
+            timeoutMs = 1500L
+        )
+
         assertFalse(oldSuccess)
         assertTrue(manager.getFailedRequests().containsKey(failUri))
 
         faultRepo.failCount = 0
-        val newReq = manager.enqueueSave(successUri, positionMs = 30_000L, durationMs = 60_000L)
+
+        val newReq = manager.enqueueSave(
+            successUri,
+            positionMs = 30_000L,
+            durationMs = 60_000L
+        )
+
         assertNotNull(newReq)
 
         val newSuccess = manager.awaitRequest(newReq!!)
-        assertTrue("awaitRequest for new request must succeed and return true, unaffected by historical failure", newSuccess)
-        assertEquals(30_000L, realRepo.getSavedVideoPosition(successUri, 60_000L))
+
+        assertTrue(
+            "awaitRequest for new request must succeed and return true, unaffected by historical failure",
+            newSuccess
+        )
+
+        assertEquals(
+            30_000L,
+            realRepo.getSavedVideoPosition(successUri, 60_000L)
+        )
     }
 
     // -------------------------------------------------------------
@@ -689,6 +1074,7 @@ class PlaybackPreferencesTest {
         val uri = "content://media/external/video/media/cancel_during_delay"
 
         val firstAttemptFailed = CompletableDeferred<Unit>()
+
         faultRepo.onAfterFailure = { saveUri, _, _ ->
             if (saveUri == uri) {
                 firstAttemptFailed.complete(Unit)
@@ -696,18 +1082,35 @@ class PlaybackPreferencesTest {
         }
 
         faultRepo.failCount = 1
-        val req = manager.enqueueSave(uri, positionMs = 42_000L, durationMs = 100_000L)
+
+        val req = manager.enqueueSave(
+            uri,
+            positionMs = 42_000L,
+            durationMs = 100_000L
+        )
+
         assertNotNull(req)
 
         firstAttemptFailed.await()
 
         val currentWriter = manager.getWriterJobForTesting()
+
         assertNotNull(currentWriter)
-        currentWriter?.cancel(CancellationException("Simulated worker cancellation during retry delay"))
 
-        assertTrue("flushPending must succeed after worker restart", manager.flushPending(timeoutMs = 4000L))
+        currentWriter?.cancel(
+            CancellationException("Simulated worker cancellation during retry delay")
+        )
 
-        assertEquals(42_000L, realRepo.getSavedVideoPosition(uri, 100_000L))
+        assertTrue(
+            "flushPending must succeed after worker restart",
+            manager.flushPending(timeoutMs = 4000L)
+        )
+
+        assertEquals(
+            42_000L,
+            realRepo.getSavedVideoPosition(uri, 100_000L)
+        )
+
         assertEquals(0, manager.getPendingCount())
     }
 
@@ -722,16 +1125,34 @@ class PlaybackPreferencesTest {
         val videoB = "content://media/external/video/media/video_B"
 
         val genA = coordinator.onNewPlaybackSession(videoA)
+
         assertEquals(1L, genA)
         assertEquals(videoA, coordinator.currentMediaId)
 
-        val isFirstTransitionReal = coordinator.onMediaItemTransition(videoA)
-        assertFalse("Initial onMediaItemTransition for active session must not be considered a real transition", isFirstTransitionReal)
-        assertEquals("Generation must remain unchanged on initial session transition", 1L, coordinator.getCurrentPlaybackGeneration())
+        val isFirstTransitionReal =
+            coordinator.onMediaItemTransition(videoA)
 
-        val isSecondTransitionReal = coordinator.onMediaItemTransition(videoB)
-        assertTrue("Transition to different media item must be recognized as real", isSecondTransitionReal)
+        assertFalse(
+            "Initial onMediaItemTransition for active session must not be considered a real transition",
+            isFirstTransitionReal
+        )
+
+        assertEquals(
+            "Generation must remain unchanged on initial session transition",
+            1L,
+            coordinator.getCurrentPlaybackGeneration()
+        )
+
+        val isSecondTransitionReal =
+            coordinator.onMediaItemTransition(videoB)
+
+        assertTrue(
+            "Transition to different media item must be recognized as real",
+            isSecondTransitionReal
+        )
+
         val genB = coordinator.getCurrentPlaybackGeneration()
+
         assertEquals(2L, genB)
 
         val decisionStale = coordinator.evaluateRestoration(
@@ -742,7 +1163,11 @@ class PlaybackPreferencesTest {
             durationMs = 60_000L,
             isReady = true
         )
-        assertTrue("Stale generation restoration must be rejected by coordinator", decisionStale is PlaybackRestorationCoordinator.RestorationDecision.Rejected)
+
+        assertTrue(
+            "Stale generation restoration must be rejected by coordinator",
+            decisionStale is PlaybackRestorationCoordinator.RestorationDecision.Rejected
+        )
 
         val decisionValid = coordinator.evaluateRestoration(
             targetUri = videoB,
@@ -752,8 +1177,17 @@ class PlaybackPreferencesTest {
             durationMs = 60_000L,
             isReady = true
         )
-        assertTrue("Active generation restoration must be accepted", decisionValid is PlaybackRestorationCoordinator.RestorationDecision.Apply)
-        assertEquals(45_000L, (decisionValid as PlaybackRestorationCoordinator.RestorationDecision.Apply).effectivePositionMs)
+
+        assertTrue(
+            "Active generation restoration must be accepted",
+            decisionValid is PlaybackRestorationCoordinator.RestorationDecision.Apply
+        )
+
+        assertEquals(
+            45_000L,
+            (decisionValid as PlaybackRestorationCoordinator.RestorationDecision.Apply)
+                .effectivePositionMs
+        )
     }
 
     // -------------------------------------------------------------
@@ -767,8 +1201,16 @@ class PlaybackPreferencesTest {
         val gen = coordinator.onNewPlaybackSession(uri)
 
         coordinator.onManualSeek(15_000L)
-        assertTrue("isRestorationApplied must be true after manual seek", coordinator.isRestorationApplied)
-        assertNull("Pending restoration must be cleared after manual seek", coordinator.pendingUri)
+
+        assertTrue(
+            "isRestorationApplied must be true after manual seek",
+            coordinator.isRestorationApplied
+        )
+
+        assertNull(
+            "Pending restoration must be cleared after manual seek",
+            coordinator.pendingUri
+        )
 
         val decision = coordinator.evaluateRestoration(
             targetUri = uri,
@@ -779,7 +1221,10 @@ class PlaybackPreferencesTest {
             isReady = true
         )
 
-        assertTrue("Late restoration after manual seek must be rejected", decision is PlaybackRestorationCoordinator.RestorationDecision.Rejected)
+        assertTrue(
+            "Late restoration after manual seek must be rejected",
+            decision is PlaybackRestorationCoordinator.RestorationDecision.Rejected
+        )
     }
 
     // -------------------------------------------------------------
@@ -800,17 +1245,36 @@ class PlaybackPreferencesTest {
             durationMs = 0L,
             isReady = false
         )
-        assertEquals("Restoration must be queued when duration is 0L", PlaybackRestorationCoordinator.RestorationDecision.Queued, decision)
+
+        assertEquals(
+            "Restoration must be queued when duration is 0L",
+            PlaybackRestorationCoordinator.RestorationDecision.Queued,
+            decision
+        )
+
         assertEquals(uri, coordinator.pendingUri)
         assertEquals(48_000L, coordinator.pendingPosition)
 
-        val interimResult = coordinator.checkAndApplyPendingRestoration(uri, durationMs = 0L)
-        assertNull("Pending restoration must NOT be consumed or dropped while duration is 0L", interimResult)
+        val interimResult =
+            coordinator.checkAndApplyPendingRestoration(uri, durationMs = 0L)
+
+        assertNull(
+            "Pending restoration must NOT be consumed or dropped while duration is 0L",
+            interimResult
+        )
+
         assertEquals(48_000L, coordinator.pendingPosition)
 
-        val finalEffective = coordinator.checkAndApplyPendingRestoration(uri, durationMs = 50_000L)
-        assertEquals("Position near end must reset to 0L once duration is resolved", 0L, finalEffective)
-        assertNull("Pending restoration is consumed once applied", coordinator.pendingUri)
+        val finalEffective =
+            coordinator.checkAndApplyPendingRestoration(uri, durationMs = 50_000L)
+
+        assertEquals(
+            "Position near end must reset to 0L once duration is resolved",
+            0L,
+            finalEffective
+        )
+
+        assertNull(coordinator.pendingUri)
         assertTrue(coordinator.isRestorationApplied)
     }
 
@@ -826,28 +1290,49 @@ class PlaybackPreferencesTest {
 
         val uri = "content://media/external/video/media/direct_capture_test"
 
-        val fallbackWhenDirectSuccess = PositionSavePolicy.shouldEnqueueFallbackSave(
-            capturedDirectlyFromPlayer = true,
-            uri = uri,
-            currentPositionMs = 35_000L,
+        val fallbackWhenDirectSuccess =
+            PositionSavePolicy.shouldEnqueueFallbackSave(
+                capturedDirectlyFromPlayer = true,
+                uri = uri,
+                currentPositionMs = 35_000L,
+                durationMs = 120_000L
+            )
+
+        assertNull(
+            "PositionSavePolicy must return null when direct capture succeeds",
+            fallbackWhenDirectSuccess
+        )
+
+        val req1 = manager.enqueueSave(
+            uri,
+            positionMs = 35_400L,
             durationMs = 120_000L
         )
-        assertNull("PositionSavePolicy must return null when direct capture succeeds", fallbackWhenDirectSuccess)
 
-        val req1 = manager.enqueueSave(uri, positionMs = 35_400L, durationMs = 120_000L)
         assertNotNull(req1)
 
-        val fallbackWhenDirectFailed = PositionSavePolicy.shouldEnqueueFallbackSave(
-            capturedDirectlyFromPlayer = false,
-            uri = uri,
-            currentPositionMs = 35_000L,
-            durationMs = 120_000L
+        val fallbackWhenDirectFailed =
+            PositionSavePolicy.shouldEnqueueFallbackSave(
+                capturedDirectlyFromPlayer = false,
+                uri = uri,
+                currentPositionMs = 35_000L,
+                durationMs = 120_000L
+            )
+
+        assertNotNull(
+            "PositionSavePolicy must allow fallback save when direct capture fails",
+            fallbackWhenDirectFailed
         )
-        assertNotNull("PositionSavePolicy must allow fallback save when direct capture fails", fallbackWhenDirectFailed)
+
         assertEquals(35_000L, fallbackWhenDirectFailed!!.positionMs)
 
         assertTrue(manager.flushPending(timeoutMs = 2000L))
-        assertEquals("Stored position must be the exact ExoPlayer position", 35_400L, realRepo.getSavedVideoPosition(uri, 120_000L))
+
+        assertEquals(
+            "Stored position must be the exact ExoPlayer position",
+            35_400L,
+            realRepo.getSavedVideoPosition(uri, 120_000L)
+        )
     }
 
     // -------------------------------------------------------------
@@ -860,10 +1345,18 @@ class PlaybackPreferencesTest {
 
         val gen = coordinator.onNewPlaybackSession(uri)
 
-        val earlyCheck = coordinator.checkAndApplyPendingRestoration(uri, durationMs = 60_000L)
+        val earlyCheck =
+            coordinator.checkAndApplyPendingRestoration(uri, durationMs = 60_000L)
 
-        assertNull("No restoration should be applied yet before DataStore completes", earlyCheck)
-        assertFalse("Restoration must NOT be declared completed prematurely!", coordinator.isRestorationApplied)
+        assertNull(
+            "No restoration should be applied yet before DataStore completes",
+            earlyCheck
+        )
+
+        assertFalse(
+            "Restoration must NOT be declared completed prematurely!",
+            coordinator.isRestorationApplied
+        )
 
         val decision = coordinator.evaluateRestoration(
             targetUri = uri,
@@ -874,10 +1367,21 @@ class PlaybackPreferencesTest {
             isReady = true
         )
 
-        assertTrue("Late DataStore result MUST be applied successfully", decision is PlaybackRestorationCoordinator.RestorationDecision.Apply)
-        val appliedPos = (decision as PlaybackRestorationCoordinator.RestorationDecision.Apply).effectivePositionMs
+        assertTrue(
+            "Late DataStore result MUST be applied successfully",
+            decision is PlaybackRestorationCoordinator.RestorationDecision.Apply
+        )
+
+        val appliedPos =
+            (decision as PlaybackRestorationCoordinator.RestorationDecision.Apply)
+                .effectivePositionMs
+
         assertEquals(25_000L, appliedPos)
-        assertTrue("Restoration is now marked as applied", coordinator.isRestorationApplied)
+
+        assertTrue(
+            "Restoration is now marked as applied",
+            coordinator.isRestorationApplied
+        )
     }
 
     // -------------------------------------------------------------
@@ -893,17 +1397,39 @@ class PlaybackPreferencesTest {
         val uri = "content://media/external/video/media/scrub_test"
         val durationMs = 120_000L
 
-        val oldReq = manager.enqueueSave(uri, positionMs = 15_000L, durationMs = durationMs)
+        val oldReq = manager.enqueueSave(
+            uri,
+            positionMs = 15_000L,
+            durationMs = durationMs
+        )
+
         assertNotNull("Periodic save must be enqueued", oldReq)
 
-        val scrubReq = manager.enqueueSave(uri, positionMs = 85_000L, durationMs = durationMs)
+        val scrubReq = manager.enqueueSave(
+            uri,
+            positionMs = 85_000L,
+            durationMs = durationMs
+        )
+
         assertNotNull("Scrub stop save must be enqueued", scrubReq)
 
-        assertTrue("Scrub save sequence must be higher than periodic save", scrubReq!!.sequenceNumber > oldReq!!.sequenceNumber)
+        assertTrue(
+            "Scrub save sequence must be higher than periodic save",
+            scrubReq!!.sequenceNumber > oldReq!!.sequenceNumber
+        )
 
-        assertTrue("Flush must succeed", manager.flushPending(timeoutMs = 2000L))
+        assertTrue(
+            "Flush must succeed",
+            manager.flushPending(timeoutMs = 2000L)
+        )
+
         val persisted = realRepo.getSavedVideoPosition(uri, durationMs)
-        assertEquals("Persisted position must be the final scrubbed position", 85_000L, persisted)
+
+        assertEquals(
+            "Persisted position must be the final scrubbed position",
+            85_000L,
+            persisted
+        )
     }
 
     // -------------------------------------------------------------
@@ -916,20 +1442,48 @@ class PlaybackPreferencesTest {
 
         val keyIndex0 = "${baseMediaId}_#0"
         val gen0 = coordinator.onNewPlaybackSession(keyIndex0)
+
         assertEquals(1L, gen0)
 
-        val isInitialTransition = coordinator.onMediaItemTransition(keyIndex0, isRepeat = false)
-        assertFalse("Initial transition for registered session must not trigger real transition", isInitialTransition)
-        assertEquals("Playback generation must remain unchanged on session start", 1L, coordinator.getCurrentPlaybackGeneration())
+        val isInitialTransition =
+            coordinator.onMediaItemTransition(keyIndex0, isRepeat = false)
+
+        assertFalse(
+            "Initial transition for registered session must not trigger real transition",
+            isInitialTransition
+        )
+
+        assertEquals(
+            "Playback generation must remain unchanged on session start",
+            1L,
+            coordinator.getCurrentPlaybackGeneration()
+        )
 
         coordinator.onManualSeek(12_000L)
+
         assertTrue(coordinator.isRestorationApplied)
 
         val keyIndex1 = "${baseMediaId}_#1"
-        val isSecondTransition = coordinator.onMediaItemTransition(keyIndex1, isRepeat = false)
-        assertTrue("Transition to identical media at different index must be recognized as real transition", isSecondTransition)
-        assertEquals("Playback generation must increment for new playlist index", 2L, coordinator.getCurrentPlaybackGeneration())
-        assertFalse("Restoration applied flag must reset for new index", coordinator.isRestorationApplied)
+
+        val isSecondTransition =
+            coordinator.onMediaItemTransition(keyIndex1, isRepeat = false)
+
+        assertTrue(
+            "Transition to identical media at different index must be recognized as real transition",
+            isSecondTransition
+        )
+
+        assertEquals(
+            "Playback generation must increment for new playlist index",
+            2L,
+            coordinator.getCurrentPlaybackGeneration()
+        )
+
+        assertFalse(
+            "Restoration applied flag must reset for new index",
+            coordinator.isRestorationApplied
+        )
+
         assertEquals(keyIndex1, coordinator.currentMediaId)
     }
 
@@ -942,18 +1496,37 @@ class PlaybackPreferencesTest {
         val mediaKey = "single_looped_video_#0"
 
         val gen0 = coordinator.onNewPlaybackSession(mediaKey)
+
         assertEquals(1L, gen0)
 
-        assertFalse(coordinator.onMediaItemTransition(mediaKey, isRepeat = false))
+        assertFalse(
+            coordinator.onMediaItemTransition(mediaKey, isRepeat = false)
+        )
+
         assertEquals(1L, coordinator.getCurrentPlaybackGeneration())
 
         coordinator.onManualSeek(30_000L)
+
         assertTrue(coordinator.isRestorationApplied)
 
-        val isRepeatTransition = coordinator.onMediaItemTransition(mediaKey, isRepeat = true)
-        assertTrue("Repeat One loop must be treated as a real transition", isRepeatTransition)
-        assertEquals("Playback generation must increment on Repeat One loop", 2L, coordinator.getCurrentPlaybackGeneration())
-        assertFalse("Restoration applied flag must reset for the new loop", coordinator.isRestorationApplied)
+        val isRepeatTransition =
+            coordinator.onMediaItemTransition(mediaKey, isRepeat = true)
+
+        assertTrue(
+            "Repeat One loop must be treated as a real transition",
+            isRepeatTransition
+        )
+
+        assertEquals(
+            "Playback generation must increment on Repeat One loop",
+            2L,
+            coordinator.getCurrentPlaybackGeneration()
+        )
+
+        assertFalse(
+            "Restoration applied flag must reset for the new loop",
+            coordinator.isRestorationApplied
+        )
     }
 
     // -------------------------------------------------------------
@@ -968,14 +1541,34 @@ class PlaybackPreferencesTest {
 
         val uri = "content://media/external/video/media/unknown_duration_test"
 
-        val req = manager.enqueueSave(uri, positionMs = 42_500L, durationMs = 0L)
-        assertNotNull("Pause with duration 0L must be accepted and enqueued", req)
+        val req = manager.enqueueSave(
+            uri,
+            positionMs = 42_500L,
+            durationMs = 0L
+        )
+
+        assertNotNull(
+            "Pause with duration 0L must be accepted and enqueued",
+            req
+        )
+
         assertEquals(42_500L, req!!.positionMs)
         assertEquals(0L, req.durationMs)
 
-        assertTrue("Flush must succeed for unknown duration save", manager.flushPending(timeoutMs = 2000L))
+        assertTrue(
+            "Flush must succeed for unknown duration save",
+            manager.flushPending(timeoutMs = 2000L)
+        )
 
-        val storedRaw = realRepo.getSavedVideoPosition(uri, durationMs = 0L)
-        assertEquals("Raw position must be faithfully stored even when duration was 0L", 42_500L, storedRaw)
+        val storedRaw = realRepo.getSavedVideoPosition(
+            uri,
+            durationMs = 0L
+        )
+
+        assertEquals(
+            "Raw position must be faithfully stored even when duration was 0L",
+            42_500L,
+            storedRaw
+        )
     }
 }
