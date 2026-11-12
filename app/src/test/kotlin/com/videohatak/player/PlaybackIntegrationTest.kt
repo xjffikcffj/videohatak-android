@@ -1,3 +1,4 @@
+
 package com.videohatak.player
 
 import android.app.Application
@@ -1009,14 +1010,17 @@ class PlaybackIntegrationTest {
 
         testDispatcher.scheduler.advanceUntilIdle()
 
+        // The player must become ready before waiting for position restoration.
+        fakePlayer.triggerPlaybackStateChanged(Player.STATE_READY)
+        testDispatcher.scheduler.advanceUntilIdle()
+
         withTimeout(5_000L) {
-            while (fakePlayer.currentPosition != 15_000L) {
+            while (!fakePlayer.seekCalls.contains(15_000L)) {
                 testDispatcher.scheduler.advanceUntilIdle()
                 delay(10L)
             }
         }
 
-        fakePlayer.triggerPlaybackStateChanged(Player.STATE_READY)
         testDispatcher.scheduler.advanceUntilIdle()
 
         assertEquals(15_000L, fakePlayer.currentPosition)
